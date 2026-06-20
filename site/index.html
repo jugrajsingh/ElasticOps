@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ElasticOps — Elasticsearch Cluster Operations Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #1C1917;
+      --surface:    #292524;
+      --surface2:   #3C3836;
+      --amber:      #D4A574;
+      --cream:      #F5F0EB;
+      --sage:       #7C9885;
+      --terracotta: #CC8B65;
+      --muted:      #A8A29E;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--cream);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      border-bottom: 1px solid var(--surface2);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      text-decoration: none;
+    }
+
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--amber);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 1rem;
+      color: var(--bg);
+      flex-shrink: 0;
+    }
+
+    .logo-text {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--cream);
+      letter-spacing: -0.02em;
+    }
+
+    nav { display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
+
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.875rem;
+      transition: color 0.15s;
+    }
+    nav a:hover { color: var(--amber); }
+
+    /* ── Hero ── */
+    .hero {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 5rem 2rem 3rem;
+      text-align: center;
+    }
+
+    .badge {
+      display: inline-block;
+      background: var(--surface);
+      color: var(--sage);
+      border: 1px solid var(--surface2);
+      border-radius: 999px;
+      padding: 0.25rem 0.85rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      color: var(--cream);
+      margin-bottom: 1rem;
+    }
+
+    h1 span { color: var(--amber); }
+
+    .tagline {
+      font-size: 1.05rem;
+      color: var(--muted);
+      max-width: 540px;
+      margin: 0 auto 2.5rem;
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.6rem 1.4rem;
+      border-radius: 7px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.15s, background 0.15s;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: var(--amber);
+      color: var(--bg);
+    }
+    .btn-primary:hover { opacity: 0.88; }
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--cream);
+      border: 1px solid var(--surface2);
+    }
+    .btn-secondary:hover { background: var(--surface2); }
+
+    /* ── Features ── */
+    .features-section {
+      max-width: 900px;
+      margin: 4rem auto 0;
+      padding: 0 2rem 5rem;
+    }
+
+    .section-label {
+      text-align: center;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--terracotta);
+      font-weight: 700;
+      margin-bottom: 0.6rem;
+    }
+
+    .section-title {
+      text-align: center;
+      font-size: clamp(1.4rem, 3vw, 2rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--cream);
+      margin-bottom: 2.5rem;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+    }
+
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--surface2);
+      border-radius: 10px;
+      padding: 1.4rem 1.5rem;
+      transition: border-color 0.15s;
+    }
+    .feature-card:hover { border-color: var(--amber); }
+
+    .feature-icon {
+      font-size: 1.4rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .feature-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--cream);
+      margin-bottom: 0.4rem;
+    }
+
+    .feature-desc {
+      font-size: 0.84rem;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--surface2);
+      padding: 1.5rem 2rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.82rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    footer a {
+      color: var(--muted);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    footer a:hover { color: var(--amber); }
+
+    /* ── Responsive ── */
+    @media (max-width: 480px) {
+      header { padding: 0.85rem 1.25rem; }
+      .hero { padding: 3.5rem 1.25rem 2rem; }
+      .features-section { padding: 0 1.25rem 3.5rem; }
+      footer { padding: 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <a href="/" class="logo">
+      <div class="logo-icon">E</div>
+      <span class="logo-text">ElasticOps</span>
+    </a>
+    <nav>
+      <a href="https://github.com/jugrajsingh/ElasticOps">GitHub</a>
+      <a href="https://github.com/jugrajsingh/ElasticOps/blob/main/README.md">Docs</a>
+      <a href="https://github.com/jugrajsingh/ElasticOps/blob/main/LICENSE">License</a>
+      <a href="https://github.com/jugrajsingh/ElasticOps/blob/main/SECURITY.md">Security</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="badge">Open Source &bull; AGPL-3.0</div>
+      <h1>Manage Elasticsearch<br /><span>with confidence</span></h1>
+      <p class="tagline">
+        Modern open-source Elasticsearch cluster operations dashboard —
+        the Cerebro successor built for today's ops teams.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/jugrajsingh/ElasticOps">
+          View on GitHub
+        </a>
+        <a class="btn btn-secondary" href="https://github.com/jugrajsingh/ElasticOps/blob/main/README.md">
+          Read the Docs
+        </a>
+      </div>
+    </section>
+
+    <section class="features-section">
+      <p class="section-label">Features</p>
+      <h2 class="section-title">Everything your cluster needs</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">&#128202;</div>
+          <div class="feature-title">Cluster Overview</div>
+          <p class="feature-desc">
+            Real-time health, node stats, JVM memory, disk usage, and shard
+            counts — all in one glanceable dashboard.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128917;</div>
+          <div class="feature-title">Shard Map</div>
+          <p class="feature-desc">
+            Visual shard-level layout across nodes. Spot imbalances,
+            unassigned shards, and relocation events instantly.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128269;</div>
+          <div class="feature-title">Index Analysis</div>
+          <p class="feature-desc">
+            Per-index optimization recommendations: segment counts, merge
+            candidates, replica ratios, and storage efficiency scores.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#9881;</div>
+          <div class="feature-title">Job Engine</div>
+          <p class="feature-desc">
+            Async job execution for force-merge, shard reduction, and index
+            operations — with full audit history and progress tracking.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#127760;</div>
+          <div class="feature-title">Multi-Cluster</div>
+          <p class="feature-desc">
+            Connect and switch between multiple Elasticsearch clusters from
+            a single UI. No config files to hand-edit.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128274;</div>
+          <div class="feature-title">Auth &amp; RBAC</div>
+          <p class="feature-desc">
+            Local JWT authentication with bcrypt hashing. Per-user cluster
+            access controls with an admin panel to manage users.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>&copy; 2025 ElasticOps contributors</span>
+    <a href="https://github.com/jugrajsingh/ElasticOps">GitHub</a>
+    <a href="https://github.com/jugrajsingh/ElasticOps/blob/main/README.md">README</a>
+    <a href="https://github.com/jugrajsingh/ElasticOps/blob/main/LICENSE">AGPL-3.0</a>
+    <a href="https://github.com/jugrajsingh/ElasticOps/blob/main/SECURITY.md">SECURITY.md</a>
+  </footer>
+
+</body>
+</html>
