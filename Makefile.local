@@ -1,0 +1,73 @@
+# =============================================================================
+# Makefile.local - Local Development Commands
+# =============================================================================
+# Usage: make -f Makefile.local <target>
+# =============================================================================
+
+VENV := .venv
+export PYTHONPATH := $(CURDIR)
+
+.DEFAULT_GOAL := help
+
+.PHONY: help setup install install-dev install-hooks install-frontend
+
+help:  ## Show available targets
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+setup: install-dev install-hooks install-frontend  ## Full local setup
+	@echo "\nSetup complete. Run: make -f Makefile.local run"
+
+install:  ## Install production Python deps
+	uv sync --no-dev
+
+install-dev:  ## Install all Python deps (including dev)
+	uv sync --extra dev
+
+install-hooks: install-dev  ## Install pre-commit hooks
+	uv run pre-commit install --install-hooks
+
+install-frontend:  ## Install frontend deps
+	cd frontend && npm ci
+
+.PHONY: run-backend run-frontend run
+
+run-backend:  ## Start FastAPI on :4354
+	uv run uvicorn backend.main:app --reload --port 4354
+
+run-frontend:  ## Start Vite dev server on :5173
+	cd frontend && npm run dev
+
+run:  ## Start both backend and frontend
+	@uv run uvicorn backend.main:app --reload --port 4354 & \
+	BACKEND_PID=$$!; \
+	trap "kill $$BACKEND_PID 2>/dev/null; exit" INT TERM; \
+	cd frontend && npm run dev; \
+	kill $$BACKEND_PID 2>/dev/null
+
+.PHONY: test test-cov
+
+test:  ## Run tests
+	uv run pytest tests/ -v
+
+test-cov:  ## Run tests with coverage
+	uv run pytest tests/ --cov --cov-report=term-missing
+
+.PHONY: lint lint-fix format quality fix
+
+lint:  ## Run linter
+	uv run ruff check .
+
+lint-fix:  ## Run linter with auto-fix
+	uv run ruff check . --fix
+
+format:  ## Format code
+	uv run ruff format .
+
+quality: lint  ## Run all quality checks
+
+fix: lint-fix format  ## Auto-fix lint + format
+
+.PHONY: clean
+
+clean:  ## Remove caches and DB
+	rm -rf __pycache__ */__pycache__ */*/__pycache__ .pytest_cache .ruff_cache .mypy_cache .coverage elasticops.db

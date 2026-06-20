@@ -1,0 +1,39 @@
+name: Pages
+
+# DISABLED while this repository is PRIVATE — GitHub Pages requires a public repo
+# (Free plan). The site under site/ is built and ready. To ENABLE when you go public:
+#   1. Settings → Pages → Source: "GitHub Actions"
+#   2. Uncomment the `push:` trigger below.
+# The deploy job is also guarded to no-op unless the repo is public, so a stray
+# manual run while private won't fail.
+
+on:
+  # push:
+  #   branches: [main]
+  #   paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.event.repository.visibility == 'public' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

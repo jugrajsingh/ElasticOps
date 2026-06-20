@@ -1,0 +1,106 @@
+# =============================================================================
+# Pre-commit configuration for ElasticOps
+# =============================================================================
+#
+# Usage:
+#   pre-commit install
+#   pre-commit run --all-files
+#   pre-commit autoupdate
+#
+# =============================================================================
+
+minimum_pre_commit_version: 3.6.0
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+fail_fast: false
+
+repos:
+  # ============================================================
+  # 1. SECURITY (detect secrets and vulnerabilities early)
+  # ============================================================
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Audit our uv-locked deps for known CVEs: pipes `uv export` into pip-audit
+  # (--disable-pip --no-deps --skip-editable) so it audits exactly what we ship,
+  # fast, with no false positives from pre-commit's own tooling. Always runs —
+  # CVE databases update daily even when our deps don't change.
+  # Requires `uv` + `pip-audit` on PATH:  uv tool install pip-audit
+  - repo: local
+    hooks:
+      - id: pip-audit
+        name: pip-audit (uv-locked deps)
+        entry: bash -c 'uv export --frozen --no-emit-project --no-hashes | uv tool run pip-audit -r /dev/stdin --disable-pip --no-deps --skip-editable --desc --format=columns'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # ============================================================
+  # 2. STANDARD CHECKS (file validation, git hygiene)
+  # ============================================================
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args:
+          - --maxkb=1000
+      - id: no-commit-to-branch
+        args:
+          - --branch
+          - main
+          - --branch
+          - develop
+      - id: check-ast
+      - id: debug-statements
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args:
+          - --fix=lf
+
+  # ============================================================
+  # 3. PYTHON: RUFF (replaces black, isort, flake8, bandit)
+  # ============================================================
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.7
+    hooks:
+      - id: ruff-format
+      - id: ruff
+        args:
+          - --fix
+          - --exit-non-zero-on-fix
+
+  # ============================================================
+  # 4. CONVENTIONAL COMMITS (commit-msg stage)
+  # ============================================================
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages:
+          - commit-msg
+        args:
+          - feat
+          - fix
+          - docs
+          - style
+          - refactor
+          - perf
+          - test
+          - build
+          - ci
+          - chore
+          - revert

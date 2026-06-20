@@ -1,0 +1,17 @@
+# =============================================================================
+# Makefile.deploy - Docker Build & Deploy Commands
+# =============================================================================
+
+IMAGE_NAME := elasticops
+IMAGE_TAG := latest
+
+.PHONY: help docker-build docker-run
+
+help:  ## Show available targets
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+docker-build:  ## Build Docker image
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+
+docker-run:  ## Run Docker container
+	docker run --rm -p 4354:4354 $(IMAGE_NAME):$(IMAGE_TAG)

@@ -1,0 +1,80 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local config (secrets)
+local.env.yaml
+*.env.yaml
+!example.env.yaml
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+credentials.json
+.elasticops-secrets.json
+*-secrets.json
+
+# Node
+node_modules/
+frontend/dist/
+
+# Database
+*.db
+*.sqlite3
+
+# Cache
+.cache/
+.grepai/
+
+# Test / coverage
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+coverage.xml
+
+# Claude
+.claude/
+.mcp.json
+
+# Planning docs (not committed until final documentation)
+docs/designs/
+docs/decisions/
+docs/plans/
+docs/specs/
+docs/PROJECT-CONTEXT.md
+docs/superpowers/
+scripts/
+
+# Local agent context / weekend handoff
+CLAUDE.local.md
+pending-commits.md

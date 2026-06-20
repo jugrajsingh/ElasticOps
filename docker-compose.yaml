@@ -1,0 +1,9 @@
+services:
+  elasticops:
+    build: .
+    ports:
+      - "4354:4354"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE__URL=sqlite+aiosqlite:///./data/elasticops.db
