@@ -1,0 +1,44 @@
+# 3-node Elasticsearch cluster for local integration testing (ElasticOps).
+# Security is disabled and heaps are tiny — this is for tests only, never production.
+# es01 is published on host port 9201 so ELASTICOPS_TEST_ES=http://localhost:9201 reaches it.
+services:
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      - node.name=es01
+      - cluster.name=elasticops-test
+      - discovery.seed_hosts=es02,es03
+      - cluster.initial_master_nodes=es01,es02,es03
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9201:9200"
+    networks:
+      - estest
+
+  es02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      - node.name=es02
+      - cluster.name=elasticops-test
+      - discovery.seed_hosts=es01,es03
+      - cluster.initial_master_nodes=es01,es02,es03
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    networks:
+      - estest
+
+  es03:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      - node.name=es03
+      - cluster.name=elasticops-test
+      - discovery.seed_hosts=es01,es02
+      - cluster.initial_master_nodes=es01,es02,es03
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    networks:
+      - estest
+
+networks:
+  estest: {}

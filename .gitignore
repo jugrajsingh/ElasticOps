@@ -71,6 +71,7 @@ docs/designs/
 docs/decisions/
 docs/plans/
 docs/specs/
+docs/audit/
 docs/PROJECT-CONTEXT.md
 docs/superpowers/
 scripts/
@@ -78,3 +79,9 @@ scripts/
 # Local agent context / weekend handoff
 CLAUDE.local.md
 pending-commits.md
+
+# Local demo / laptop-specific compose overrides
+docker-compose.local.yaml
+
+# Build output not meant for source control
+static/

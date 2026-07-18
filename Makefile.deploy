@@ -4,8 +4,9 @@
 
 IMAGE_NAME := elasticops
 IMAGE_TAG := latest
+DATA_VOLUME := elasticops-data
 
-.PHONY: help docker-build docker-run
+.PHONY: help docker-build docker-run up down logs ps
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -13,5 +14,17 @@ help:  ## Show available targets
 docker-build:  ## Build Docker image
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
-docker-run:  ## Run Docker container
-	docker run --rm -p 4354:4354 $(IMAGE_NAME):$(IMAGE_TAG)
+docker-run:  ## Run the image directly, persisting data to the named volume
+	docker run --rm -p 4354:4354 -v $(DATA_VOLUME):/app/data $(IMAGE_NAME):$(IMAGE_TAG)
+
+up:  ## Build (if needed) and start via docker compose
+	docker compose up --build -d
+
+down:  ## Stop the stack (named volume is kept — data persists)
+	docker compose down
+
+logs:  ## Follow the app logs
+	docker compose logs -f elasticops
+
+ps:  ## Show stack status
+	docker compose ps

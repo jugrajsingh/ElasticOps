@@ -83,7 +83,20 @@ repos:
           - --exit-non-zero-on-fix
 
   # ============================================================
-  # 4. CONVENTIONAL COMMITS (commit-msg stage)
+  # 4. MYPY (strict, ratcheted — per-module overrides in pyproject.toml)
+  # ============================================================
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict, ratcheted)
+        entry: uv run mypy backend/ config/
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # ============================================================
+  # 5. CONVENTIONAL COMMITS (commit-msg stage)
   # ============================================================
 
   - repo: https://github.com/compilerla/conventional-pre-commit

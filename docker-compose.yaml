@@ -1,9 +1,30 @@
+# ElasticOps — build + run the whole app (React build → FastAPI → runtime) from one image.
+#
+#   docker compose up --build      # build the image and start the app on http://localhost:4354
+#   docker compose down            # stop (the named volume is KEPT — your data persists)
+#   docker compose down -v         # stop AND delete the volume (wipes DB + secrets)
+#
+# All persisted state (the SQLite database and the auto-generated secrets file) lives on the
+# named volume `elasticops-data`, so it survives container/image rebuilds.
 services:
   elasticops:
     build: .
+    image: elasticops:latest
+    container_name: elasticops
     ports:
       - "4354:4354"
-    volumes:
-      - ./data:/app/data
     environment:
-      - DATABASE__URL=sqlite+aiosqlite:///./data/elasticops.db
+      # DB + secrets both point at the persisted volume (defaults are also baked into the image).
+      DATABASE__URL: "sqlite+aiosqlite:////app/data/elasticops.db"
+      SECURITY__SECRETS_FILE: "/app/data/.elasticops-secrets.json"
+      # For production, pin these instead of relying on the auto-generated secrets file (uncomment
+      # and supply via a local .env file — never commit real secrets):
+      # AUTH__JWT_SECRET: "${AUTH__JWT_SECRET:-}"
+      # SECURITY__ENCRYPTION_KEY: "${SECURITY__ENCRYPTION_KEY:-}"
+    volumes:
+      - elasticops-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  elasticops-data:
+    name: elasticops-data

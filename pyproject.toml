@@ -10,7 +10,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "pydantic>=2.0",
     "pydantic-settings[yaml]>=2.0",
-    "python-jose[cryptography]>=3.3.0",
+    "pyjwt>=2.10.0",
     "bcrypt>=4.0.0",
     "httpx>=0.28.0",
     "cryptography>=43.0.0",
@@ -32,6 +32,9 @@ postgres = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: tests that require a live Elasticsearch cluster (set ELASTICOPS_TEST_ES); auto-skipped otherwise",
+]
 
 [tool.ruff]
 line-length = 120
@@ -44,3 +47,33 @@ ignore = ["B008"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+plugins = ["pydantic.mypy"]
+
+# Ratchet: the modules below have PRE-EXISTING strict errors; they are exempted so CI is green
+# today and burned down module-by-module in follow-ups. Do NOT add new modules here — new code
+# (e.g. backend.services.rebalance, backend.services.rate_limit) must be strict-clean.
+[[tool.mypy.overrides]]
+module = [
+    "backend.auth",
+    "backend.dependencies",
+    "backend.main",
+    "backend.models.snapshot",
+    "backend.routes.admin",
+    "backend.routes.auth",
+    "backend.routes.clusters",
+    "backend.routes.es",
+    "backend.routes.health",
+    "backend.routes.jobs",
+    "backend.services.analyzer",
+    "backend.services.drain",
+    "backend.services.es_client",
+    "backend.services.executor",
+    "backend.services.job_runner",
+    "backend.services.poller",
+    "backend.services.recommender",
+    "backend.services.role_logic",
+    "backend.services.secrets",
+    "backend.services.snapshot_repo",
+    "backend.services.snapshot_service",
+]
+ignore_errors = true
