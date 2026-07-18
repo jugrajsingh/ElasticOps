@@ -26,7 +26,11 @@ async def test_should_return_cluster_health(authed_client: AsyncClient):
     try:
         response = await authed_client.get("/api/clusters/1/es/health")
         assert response.status_code == 200
-        data = response.json()
+        wrapper = response.json()
+        # No snapshot seeded → live fallback, wrapped with stale_seconds == 0.
+        assert wrapper["stale_seconds"] == 0
+        assert wrapper["fetched_at"] is not None
+        data = wrapper["data"]
         assert data["status"] == "green"
         assert data["number_of_nodes"] == 3
     finally:
@@ -53,15 +57,32 @@ async def test_should_return_node_list(authed_client: AsyncClient):
             "segments.count": "1500",
         }
     ]
+    mock_es.cat_shards_detailed.return_value = [
+        {
+            "index": "idx",
+            "shard": "0",
+            "prirep": "p",
+            "state": "STARTED",
+            "docs": "10",
+            "store": "100",
+            "node": "hot-01",
+            "segments.count": "1",
+        }
+    ]
     app.dependency_overrides[get_es_client] = lambda: mock_es
 
     try:
         response = await authed_client.get("/api/clusters/1/es/nodes")
         assert response.status_code == 200
-        nodes = response.json()
+        wrapper = response.json()
+        assert wrapper["stale_seconds"] == 0
+        nodes = wrapper["data"]
         assert len(nodes) == 1
         assert nodes[0]["name"] == "hot-01"
         assert nodes[0]["disk_used_percent"] == 70.0
+        # NodeInfoEx precomputed fields.
+        assert nodes[0]["shard_count"] == 1
+        assert nodes[0]["tier"] == "hot"
     finally:
         app.dependency_overrides.pop(get_es_client, None)
 
@@ -82,13 +103,16 @@ async def test_should_return_overview(authed_client: AsyncClient):
         "unassigned_shards": 5,
     }
     mock_es.cat_nodes_detailed.return_value = []
+    mock_es.cat_indices_detailed.return_value = []
     mock_es.cat_recovery_active.return_value = []
     app.dependency_overrides[get_es_client] = lambda: mock_es
 
     try:
         response = await authed_client.get("/api/clusters/1/es/overview")
         assert response.status_code == 200
-        data = response.json()
+        wrapper = response.json()
+        assert wrapper["stale_seconds"] == 0
+        data = wrapper["data"]
         assert data["health"]["status"] == "yellow"
         assert data["health"]["unassigned_shards"] == 5
     finally:
@@ -144,10 +168,14 @@ async def test_should_return_shard_map(authed_client: AsyncClient):
     try:
         response = await authed_client.get("/api/clusters/1/es/shard-map")
         assert response.status_code == 200
-        data = response.json()
-        assert len(data["nodes"]) == 1
-        assert len(data["indices"]) == 1
-        assert len(data["shards"]) == 1
+        wrapper = response.json()
+        assert wrapper["stale_seconds"] == 0
+        grid = wrapper["data"]
+        # New precomputed grid shape: data_nodes columns, index rows, per-cell chips.
+        assert len(grid["data_nodes"]) == 1
+        assert grid["data_nodes"][0]["name"] == "node-1"
+        assert len(grid["indices"]) == 1
+        assert grid["cells"]["test-idx node-1"][0]["shard"] == 0
     finally:
         app.dependency_overrides.pop(get_es_client, None)
 

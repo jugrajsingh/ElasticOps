@@ -1,23 +1,41 @@
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.dependencies import get_es_client
+from backend.auth import require_cluster_access
+from backend.database import get_db
+from backend.dependencies import get_es_client, require_writable_cluster
 from backend.schemas.analysis import AnalysisResponse
 from backend.schemas.es import (
+    CachedResponse,
     ClusterHealthResponse,
     IndexInfo,
     NodeInfo,
-    NodeRoleCounts,
+    NodeInfoEx,
     OverviewResponse,
     RecoveryInfo,
     ShardInfo,
-    ShardMapResponse,
     StorageGroup,
 )
-from backend.services.analyzer import IndexAnalyzer
+from backend.services import snapshot_repo
 from backend.services.es_client import ESClient
+from config.settings import PollingSettings, get_settings
 
-router = APIRouter(prefix="/api/clusters/{cluster_id}/es", tags=["elasticsearch"])
+router = APIRouter(
+    prefix="/api/clusters/{cluster_id}/es",
+    tags=["elasticsearch"],
+    dependencies=[Depends(require_cluster_access)],
+)
+
+# Which polling cadence governs each snapshot kind, so reads can report a truthful ``next_poll_in``.
+# The poller has exactly two ticks: the light tick refreshes ONLY ``health`` (``health_seconds``);
+# every other kind (overview, nodes, indices, shards, shardmap, pivot) is rebuilt on the heavy tick
+# (``heavy_seconds``), since they all depend on the heavy ``_cat/shards`` + ``_cat/nodes`` fetch.
+_LIGHT_KINDS = frozenset({"health"})
 
 
 def _safe_int(val, default: int = 0) -> int:
@@ -67,6 +85,7 @@ def _parse_index(raw: dict) -> IndexInfo:
         pri=_safe_int(raw.get("pri")),
         rep=_safe_int(raw.get("rep")),
         docs_count=_safe_int(raw.get("docs.count")),
+        docs_deleted=_safe_int(raw.get("docs.deleted")),
         store_size=_safe_int(raw.get("store.size")),
         pri_store_size=_safe_int(raw.get("pri.store.size")),
     )
@@ -97,29 +116,6 @@ def _parse_recovery(raw: dict) -> RecoveryInfo:
     )
 
 
-@router.get("/health", response_model=ClusterHealthResponse)
-async def cluster_health(es: ESClient = Depends(get_es_client)):
-    return await es.cluster_health()
-
-
-@router.get("/nodes", response_model=list[NodeInfo])
-async def list_nodes(es: ESClient = Depends(get_es_client)):
-    raw = await es.cat_nodes_detailed()
-    return [_parse_node(n) for n in raw]
-
-
-@router.get("/indices", response_model=list[IndexInfo])
-async def list_indices(es: ESClient = Depends(get_es_client)):
-    raw = await es.cat_indices_detailed()
-    return [_parse_index(i) for i in raw]
-
-
-@router.get("/shards", response_model=list[ShardInfo])
-async def list_shards(es: ESClient = Depends(get_es_client)):
-    raw = await es.cat_shards_detailed()
-    return [_parse_shard(s) for s in raw]
-
-
 def _build_storage_breakdown(raw_indices: list[dict], max_groups: int = 10) -> list[StorageGroup]:
     groups: dict[str, int] = {}
     for raw in raw_indices:
@@ -138,79 +134,270 @@ def _build_storage_breakdown(raw_indices: list[dict], max_groups: int = 10) -> l
     return result
 
 
-def _build_role_counts(nodes: list[NodeInfo]) -> NodeRoleCounts:
-    counts = NodeRoleCounts()
-    for node in nodes:
-        role = node.role.lower()
-        if role == "coord" or role == "-":
-            counts.coord += 1
-        elif "m" in role and "d" not in role:
-            counts.master += 1
-        elif "d" in role:
-            counts.data += 1
-        elif "i" in role:
-            counts.ingest += 1
-        else:
-            counts.other += 1
-    return counts
+def _now() -> datetime:
+    """Naive UTC ``now`` matching the naive ``fetched_at`` the snapshot repo stores."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
-@router.get("/overview", response_model=OverviewResponse)
-async def overview(es: ESClient = Depends(get_es_client)):
+def _poll_interval(kind: str, polling: PollingSettings) -> int:
+    """Seconds the poller waits between refreshes of ``kind`` (drives ``next_poll_in``)."""
+    if kind in _LIGHT_KINDS:
+        return polling.health_seconds
+    return polling.heavy_seconds
+
+
+async def _serve(
+    db: AsyncSession,
+    cluster_id: int,
+    kind: str,
+    build_live: Callable[[], Awaitable[Any]],
+) -> CachedResponse:
+    """Snapshot-first read with live fallback, wrapped in :class:`CachedResponse`.
+
+    If a snapshot row exists for ``(cluster_id, kind)``, serve it with a computed staleness. If not
+    (the poller hasn't run yet, or polling is disabled), run ``build_live`` to compute today's live
+    payload, best-effort upsert it so the next read is cached, and return it with ``stale_seconds==0``.
+    Never returns empty when the cluster is reachable.
+    """
+    polling = get_settings().polling
+    interval = _poll_interval(kind, polling)
+
+    snapshot = await snapshot_repo.get_latest(db, cluster_id, kind)
+    if snapshot is not None:
+        stale_seconds = max(0, int((_now() - snapshot.fetched_at).total_seconds()))
+        return CachedResponse(
+            data=snapshot.payload,
+            fetched_at=snapshot.fetched_at,
+            stale_seconds=stale_seconds,
+            next_poll_in=max(0, interval - stale_seconds),
+        )
+
+    payload = await build_live()
+    item_count = len(payload) if isinstance(payload, list) else payload.get("index_count", 0)
+    fetched = await snapshot_repo.upsert_snapshot(db, cluster_id, kind, payload, item_count, 0)
+    return CachedResponse(
+        data=payload,
+        fetched_at=fetched.fetched_at,
+        stale_seconds=0,
+        next_poll_in=interval,
+    )
+
+
+# --- Live builders (the fallback path; reuse the same pure builders the poller uses) -------------
+#
+# ``snapshot_service`` imports the parsers from this module, so it is imported lazily here to avoid a
+# circular import at module load. It is fully initialized by the time any request runs these.
+
+
+async def _live_health(es: ESClient) -> dict:
+    return await es.cluster_health()
+
+
+async def _live_overview(es: ESClient) -> dict:
+    from backend.services import snapshot_service
+
     health = await es.cluster_health()
     raw_nodes = await es.cat_nodes_detailed()
     raw_indices = await es.cat_indices_detailed()
     raw_recoveries = await es.cat_recovery_active()
-    nodes = [_parse_node(n) for n in raw_nodes]
-    return OverviewResponse(
-        health=health,
-        index_count=len(raw_indices),
-        nodes=nodes,
-        recoveries=[_parse_recovery(r) for r in raw_recoveries],
-        storage_breakdown=_build_storage_breakdown(raw_indices),
-        node_role_counts=_build_role_counts(nodes),
-    )
+    nodes = [_parse_node(n).model_dump() for n in raw_nodes]
+    indices = [_parse_index(i).model_dump() for i in raw_indices]
+    recoveries = [_parse_recovery(r).model_dump() for r in raw_recoveries]
+    return snapshot_service.build_overview(health, nodes, indices, recoveries, raw_indices)
 
 
-@router.get("/shard-map", response_model=ShardMapResponse)
-async def shard_map(es: ESClient = Depends(get_es_client)):
+async def _live_nodes(es: ESClient) -> list[dict]:
+    from backend.services import snapshot_service
+
+    raw_nodes = await es.cat_nodes_detailed()
+    raw_shards = await es.cat_shards_detailed()
+    nodes = [_parse_node(n).model_dump() for n in raw_nodes]
+    shards = [_parse_shard(s).model_dump() for s in raw_shards]
+    return snapshot_service.build_nodes(nodes, shards)
+
+
+async def _live_indices(es: ESClient) -> dict:
+    from backend.services import snapshot_service
+
+    raw_indices = await es.cat_indices_detailed()
+    raw_shards = await es.cat_shards_detailed()
+    indices = [_parse_index(i).model_dump() for i in raw_indices]
+    shards = [_parse_shard(s).model_dump() for s in raw_shards]
+    return snapshot_service.build_indices(indices, shards)
+
+
+async def _live_shards(es: ESClient) -> list[dict]:
+    from backend.services import snapshot_service
+
+    raw_shards = await es.cat_shards_detailed()
+    shards = [_parse_shard(s).model_dump() for s in raw_shards]
+    return snapshot_service.build_shards(shards)
+
+
+async def _live_shardmap(es: ESClient) -> dict:
+    from backend.services import snapshot_service
+
     raw_nodes = await es.cat_nodes_detailed()
     raw_indices = await es.cat_indices_detailed()
     raw_shards = await es.cat_shards_detailed()
-    return ShardMapResponse(
-        nodes=[_parse_node(n) for n in raw_nodes],
-        indices=[_parse_index(i) for i in raw_indices],
-        shards=[_parse_shard(s) for s in raw_shards],
-    )
-
-
-@router.get("/analyze", response_model=AnalysisResponse)
-async def analyze_indices(
-    problems_only: bool = False,
-    es: ESClient = Depends(get_es_client),
-):
-    raw_indices = await es.cat_indices_detailed()
-    raw_shards = await es.cat_shards_detailed()
-
+    nodes = [_parse_node(n).model_dump() for n in raw_nodes]
     indices = [_parse_index(i).model_dump() for i in raw_indices]
     shards = [_parse_shard(s).model_dump() for s in raw_shards]
+    return snapshot_service.build_shardmap(nodes, indices, shards)
 
-    analyzer = IndexAnalyzer(indices, shards)
-    results = analyzer.analyze_all(problems_only=problems_only)
 
-    total_wasted = sum(r["wasted_shards"] for r in results)
-    with_opps = sum(1 for r in results if r["opportunities"])
+async def _live_pivot(es: ESClient) -> dict:
+    from backend.services import snapshot_service
+    from config.settings import get_settings
 
-    return AnalysisResponse(
-        total_indices=len(results),
-        total_with_opportunities=with_opps,
-        total_wasted_shards=total_wasted,
-        indices=results,
-    )
+    raw_nodes = await es.cat_nodes_detailed()
+    raw_indices = await es.cat_indices_detailed()
+    raw_shards = await es.cat_shards_detailed()
+    nodes = [_parse_node(n).model_dump() for n in raw_nodes]
+    indices = [_parse_index(i).model_dump() for i in raw_indices]
+    shards = [_parse_shard(s).model_dump() for s in raw_shards]
+    return snapshot_service.build_pivot(indices, shards, nodes, sep=get_settings().polling.pivot_separator)
+
+
+# --- Read endpoints (snapshot-first, live fallback) ---------------------------------------------
+
+
+@router.get("/health", response_model=CachedResponse[ClusterHealthResponse])
+async def cluster_health(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    return await _serve(db, cluster_id, "health", lambda: _live_health(es))
+
+
+@router.get("/nodes", response_model=CachedResponse[list[NodeInfoEx]])
+async def list_nodes(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    return await _serve(db, cluster_id, "nodes", lambda: _live_nodes(es))
+
+
+@router.get("/indices", response_model=CachedResponse[AnalysisResponse])
+async def list_indices(
+    cluster_id: int,
+    problems_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    served = await _serve(db, cluster_id, "indices", lambda: _live_indices(es))
+    return _apply_problems_only(served, problems_only)
+
+
+@router.get("/shards", response_model=CachedResponse[list[ShardInfo]])
+async def list_shards(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    return await _serve(db, cluster_id, "shards", lambda: _live_shards(es))
+
+
+@router.get("/overview", response_model=CachedResponse[OverviewResponse])
+async def overview(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    return await _serve(db, cluster_id, "overview", lambda: _live_overview(es))
+
+
+@router.get("/shard-map", response_model=CachedResponse[dict])
+async def shard_map(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    return await _serve(db, cluster_id, "shardmap", lambda: _live_shardmap(es))
+
+
+@router.get("/pivot", response_model=CachedResponse[dict])
+async def pivot(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    return await _serve(db, cluster_id, "pivot", lambda: _live_pivot(es))
+
+
+def _apply_problems_only(served: CachedResponse, problems_only: bool) -> CachedResponse:
+    """Filter the served ``indices`` payload to opportunity-bearing indices, server-side.
+
+    The poller stores the full analyzed list once; ``problems_only`` is a trivial read-time filter so
+    no second payload is stored. Recomputes the totals over the filtered list to stay consistent.
+    """
+    if not problems_only:
+        return served
+    payload = served.data
+    filtered = [i for i in payload["indices"] if i["opportunity_count"] > 0]
+    served.data = {
+        "total_indices": len(filtered),
+        "total_with_opportunities": len(filtered),
+        "total_wasted_shards": sum(i["wasted_shards"] for i in filtered),
+        "indices": filtered,
+    }
+    return served
+
+
+@router.get("/analyze", response_model=CachedResponse[AnalysisResponse])
+async def analyze_indices(
+    cluster_id: int,
+    problems_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    served = await _serve(db, cluster_id, "indices", lambda: _live_indices(es))
+    return _apply_problems_only(served, problems_only)
+
+
+@router.post("/refresh")
+async def refresh(
+    cluster_id: int,
+    kind: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    """Force a snapshot refresh on demand. Read-only against ES.
+
+    Runs the full :func:`refresh_cluster` (fetches raw ES once and rebuilds every kind), then reports
+    the fresh ``fetched_at`` for the requested ``kind`` (or ``health`` when none is given). ``kind`` is
+    a hint for which snapshot's timestamp to return; the underlying refresh always rebuilds all kinds
+    from the single raw fetch (so a one-off refresh never costs extra ES round-trips).
+    """
+    from backend.services import snapshot_service
+
+    await snapshot_service.refresh_cluster(es, cluster_id, db, sep=get_settings().polling.pivot_separator)
+
+    snapshot = await snapshot_repo.get_latest(db, cluster_id, kind or "health")
+    return {
+        "cluster_id": cluster_id,
+        "kind": kind,
+        "fetched_at": snapshot.fetched_at if snapshot is not None else None,
+    }
+
+
+@router.get("/rebalance-suggestions")
+async def rebalance_suggestions(
+    cluster_id: int,  # noqa: ARG001 — required path param for router prefix resolution
+    es: ESClient = Depends(get_es_client),
+):
+    """Advisory: suggest relocate moves to even shard count across data nodes. Read-only against ES."""
+    from backend.services import rebalance
+
+    nodes = await es.cat_nodes_detailed()
+    shards = await es.cat_shards_detailed()
+    return {"suggestions": rebalance.suggest_moves(nodes, shards)}
 
 
 @router.get("/settings")
-async def get_settings(es: ESClient = Depends(get_es_client)):
+async def get_settings_endpoint(es: ESClient = Depends(get_es_client)):
     return await es.cluster_settings_full()
 
 
@@ -220,7 +407,14 @@ class SettingsUpdateRequest(BaseModel):
 
 
 @router.put("/settings")
-async def update_settings(body: SettingsUpdateRequest, es: ESClient = Depends(get_es_client)):
+async def update_settings(
+    cluster_id: int,
+    body: SettingsUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    """Update cluster settings. Blocked on read-only clusters (this is a cluster write)."""
+    await require_writable_cluster(cluster_id, db)
     payload: dict = {}
     if body.persistent is not None:
         payload["persistent"] = body.persistent
@@ -235,6 +429,22 @@ class RestRequest(BaseModel):
     body: dict | None = None
 
 
+# REST-console verbs that only read; everything else is treated as a write on a read-only cluster.
+_REST_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
 @router.post("/rest")
-async def rest_proxy(req: RestRequest, es: ESClient = Depends(get_es_client)):
+async def rest_proxy(
+    cluster_id: int,
+    req: RestRequest,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    """Proxy an arbitrary ES request. On read-only clusters, only read verbs (GET/HEAD) are allowed.
+
+    The FastAPI request method is always POST here; the verb that matters is ``req.method`` — the ES
+    verb carried in the request body. Block any non-read verb on a read-only cluster.
+    """
+    if req.method.upper() not in _REST_READ_METHODS:
+        await require_writable_cluster(cluster_id, db)
     return await es.proxy(req.method, req.path, req.body)

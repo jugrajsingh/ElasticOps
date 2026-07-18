@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -36,6 +38,7 @@ class IndexInfo(BaseModel):
     pri: int
     rep: int
     docs_count: int
+    docs_deleted: int = 0
     store_size: int
     pri_store_size: int
 
@@ -87,3 +90,25 @@ class ShardMapResponse(BaseModel):
     nodes: list[NodeInfo]
     indices: list[IndexInfo]
     shards: list[ShardInfo]
+
+
+class NodeInfoEx(NodeInfo):
+    """A node plus the two fields the poller precomputes for the Nodes page."""
+
+    shard_count: int
+    tier: str
+
+
+class CachedResponse[T](BaseModel):
+    """Wrapper every snapshot-backed ``/es/*`` read returns.
+
+    ``data`` is the precomputed snapshot payload (identical shape to what the snapshot stored, so the
+    frontend just reads ``resp.data``). ``fetched_at`` is when the served snapshot was produced;
+    ``stale_seconds`` is its age in seconds (0 on a live-fallback build); ``next_poll_in`` is the
+    seconds until the next expected poll for this kind (``None`` when it can't be derived).
+    """
+
+    data: T
+    fetched_at: datetime
+    stale_seconds: int
+    next_poll_in: int | None = None
