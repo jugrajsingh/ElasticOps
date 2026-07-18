@@ -68,7 +68,9 @@ async def test_should_return_analysis_with_opportunities(authed_client: AsyncCli
 
     response = await authed_client.get("/api/clusters/1/es/analyze")
     assert response.status_code == 200
-    data = response.json()
+    wrapper = response.json()
+    assert wrapper["stale_seconds"] == 0
+    data = wrapper["data"]
     assert data["total_indices"] == 2
     assert data["total_with_opportunities"] >= 1
     assert data["total_wasted_shards"] > 0
@@ -88,7 +90,7 @@ async def test_should_filter_problems_only(authed_client: AsyncClient):
 
     response = await authed_client.get("/api/clusters/1/es/analyze?problems_only=true")
     assert response.status_code == 200
-    data = response.json()
+    data = response.json()["data"]
     assert all(i["opportunity_count"] > 0 for i in data["indices"])
 
     app.dependency_overrides.pop(get_es_client, None)

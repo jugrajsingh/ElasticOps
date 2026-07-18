@@ -1,17 +1,9 @@
 from backend.services.recommender import RecommendationEngine
 
 
-def test_should_classify_segment_fragmentation_old_index_as_tier1():
-    opp = {"type": "segment-fragmentation", "severity": "medium", "wasted_shards": 0, "target_shards": 5}
-    analysis = {"pri_store_bytes": 10_000_000_000, "year": 2024}
-    job_type, tier = RecommendationEngine.classify(opp, analysis)
-    assert job_type == "force_merge"
-    assert tier == 1
-
-
-def test_should_classify_segment_fragmentation_current_index_as_tier2():
+def test_should_classify_segment_fragmentation_as_tier2():
     opp = {"type": "segment-fragmentation", "severity": "low", "wasted_shards": 0, "target_shards": 3}
-    analysis = {"pri_store_bytes": 5_000_000_000, "year": 2026}
+    analysis = {"pri_store_bytes": 5_000_000_000}
     job_type, tier = RecommendationEngine.classify(opp, analysis)
     assert job_type == "force_merge"
     assert tier == 2
@@ -19,7 +11,7 @@ def test_should_classify_segment_fragmentation_current_index_as_tier2():
 
 def test_should_classify_over_sharded_tiny_as_tier3():
     opp = {"type": "over-sharded", "severity": "high", "wasted_shards": 8, "target_shards": 1}
-    analysis = {"pri_store_bytes": 100_000_000, "year": None}  # 0.09 GB
+    analysis = {"pri_store_bytes": 100_000_000}  # 0.09 GB
     job_type, tier = RecommendationEngine.classify(opp, analysis)
     assert job_type == "reduce_shards"
     assert tier == 3
@@ -27,15 +19,24 @@ def test_should_classify_over_sharded_tiny_as_tier3():
 
 def test_should_classify_over_sharded_large_as_tier4():
     opp = {"type": "over-sharded", "severity": "medium", "wasted_shards": 4, "target_shards": 2}
-    analysis = {"pri_store_bytes": 5_000_000_000, "year": None}  # ~4.6 GB
+    analysis = {"pri_store_bytes": 5_000_000_000}  # ~4.6 GB
     job_type, tier = RecommendationEngine.classify(opp, analysis)
     assert job_type == "reduce_shards"
     assert tier == 4
 
 
+def test_should_classify_under_sharded_as_split_shards():
+    opp = {"type": "under-sharded", "severity": "high", "wasted_shards": 0, "target_shards": 8}
+    analysis = {"pri_store_bytes": 10_000_000_000}
+    job_type, tier = RecommendationEngine.classify(opp, analysis)
+    assert job_type == "split_shards"
+    assert tier == 4
+    assert job_type != "reduce_shards"
+
+
 def test_should_skip_shard_imbalance():
     opp = {"type": "shard-imbalance", "severity": "low", "wasted_shards": 0, "target_shards": 5}
-    analysis = {"pri_store_bytes": 10_000_000_000, "year": None}
+    analysis = {"pri_store_bytes": 10_000_000_000}
     job_type, tier = RecommendationEngine.classify(opp, analysis)
     assert job_type is None
     assert tier is None
@@ -51,7 +52,6 @@ def test_should_generate_jobs_from_analysis():
             "pri_store_bytes": 100_000,
             "store_bytes": 200_000,
             "max_segments_per_shard": 3,
-            "year": None,
             "opportunities": [
                 {"type": "over-sharded", "severity": "high", "wasted_shards": 8, "target_shards": 1},
             ],
@@ -64,7 +64,6 @@ def test_should_generate_jobs_from_analysis():
             "pri_store_bytes": 15_000_000_000,
             "store_bytes": 15_000_000_000,
             "max_segments_per_shard": 25,
-            "year": 2024,
             "opportunities": [
                 {"type": "segment-fragmentation", "severity": "medium", "wasted_shards": 0, "target_shards": 3},
             ],
@@ -75,4 +74,4 @@ def test_should_generate_jobs_from_analysis():
     assert jobs[0]["job_type"] == "reduce_shards"
     assert jobs[0]["tier"] == 3
     assert jobs[1]["job_type"] == "force_merge"
-    assert jobs[1]["tier"] == 1
+    assert jobs[1]["tier"] == 2

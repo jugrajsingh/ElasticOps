@@ -1,7 +1,4 @@
-IDEAL_SHARD_MIN_GB = 10
-IDEAL_SHARD_MAX_GB = 50
-IDEAL_MAX_SEGMENTS_PER_SHARD = 10
-IDEAL_MAX_SHARDS_FOR_TINY_INDEX = 1
+from config.settings import AnalyzerSettings, get_settings
 
 
 def _bytes_to_gb(num_bytes: int) -> float:
@@ -14,7 +11,8 @@ class IndexAnalyzer:
     Ported from scripts/index-analyzer.py — pure computation, no IO.
     """
 
-    def __init__(self, indices: list[dict], shards: list[dict]):
+    def __init__(self, indices: list[dict], shards: list[dict], cfg: AnalyzerSettings | None = None):
+        self._cfg: AnalyzerSettings = cfg if cfg is not None else get_settings().analyzer
         self._index_map = self._build_index_map(indices, shards)
 
     def _build_index_map(self, indices: list[dict], shards: list[dict]) -> dict:
@@ -30,6 +28,7 @@ class IndexAnalyzer:
                 "pri_count": row.get("pri", 0),
                 "rep_count": row.get("rep", 0),
                 "doc_count": row.get("docs_count", 0),
+                "docs_deleted": row.get("docs_deleted", 0),
                 "store_bytes": row.get("store_size", 0),
                 "pri_store_bytes": row.get("pri_store_size", 0),
                 "shards": [],
@@ -59,6 +58,9 @@ class IndexAnalyzer:
         pri_count = idx["pri_count"]
         rep_count = idx["rep_count"]
         doc_count = idx["doc_count"]
+        docs_deleted = int(idx.get("docs_deleted", 0) or 0)
+        total_docs = doc_count + docs_deleted
+        deleted_ratio = (docs_deleted / total_docs) if total_docs > 0 else 0.0
         pri_size_gb = _bytes_to_gb(pri_store)
 
         pri_shard_sizes = sorted([s["store_bytes"] for s in pri_shards], reverse=True)
@@ -79,7 +81,7 @@ class IndexAnalyzer:
         opportunities: list[dict] = []
 
         # Over-sharded detection
-        if pri_size_gb < 1 and pri_count > IDEAL_MAX_SHARDS_FOR_TINY_INDEX:
+        if pri_size_gb < self._cfg.tiny_index_max_gb and pri_count > self._cfg.ideal_max_shards_for_tiny_index:
             wasted = (pri_count - 1) * (1 + rep_count)
             opportunities.append(
                 {
@@ -90,8 +92,8 @@ class IndexAnalyzer:
                     "target_shards": 1,
                 }
             )
-        elif avg_shard_gb < IDEAL_SHARD_MIN_GB and pri_count > 1:
-            ideal_pri = max(1, int(pri_size_gb / IDEAL_SHARD_MAX_GB) + 1)
+        elif avg_shard_gb < self._cfg.ideal_shard_min_gb and pri_count > 1:
+            ideal_pri = max(1, int(pri_size_gb / self._cfg.ideal_shard_max_gb) + 1)
             if ideal_pri < pri_count:
                 wasted = (pri_count - ideal_pri) * (1 + rep_count)
                 opportunities.append(
@@ -105,8 +107,8 @@ class IndexAnalyzer:
                 )
 
         # Under-sharded detection
-        if max_shard_gb > IDEAL_SHARD_MAX_GB:
-            ideal_pri = max(pri_count, int(pri_size_gb / IDEAL_SHARD_MAX_GB) + 1)
+        if max_shard_gb > self._cfg.ideal_shard_max_gb:
+            ideal_pri = max(pri_count, int(pri_size_gb / self._cfg.ideal_shard_max_gb) + 1)
             if ideal_pri > pri_count:
                 opportunities.append(
                     {
@@ -119,12 +121,24 @@ class IndexAnalyzer:
                 )
 
         # Segment fragmentation
-        if max_segments > IDEAL_MAX_SEGMENTS_PER_SHARD and idx["status"] == "open":
+        if max_segments > self._cfg.ideal_max_segments_per_shard and idx["status"] == "open":
             opportunities.append(
                 {
                     "type": "segment-fragmentation",
                     "severity": "medium" if max_segments > 30 else "low",
                     "detail": f"Max {max_segments} segments/shard. Force merge to 1 segment.",
+                    "wasted_shards": 0,
+                    "target_shards": pri_count,
+                }
+            )
+
+        # Deleted-docs accumulation
+        if deleted_ratio >= 0.20 and idx["status"] == "open":
+            opportunities.append(
+                {
+                    "type": "deleted-docs",
+                    "severity": "medium" if deleted_ratio >= 0.4 else "low",
+                    "detail": f"{deleted_ratio * 100:.0f}% deleted docs ({docs_deleted}). Expunge to reclaim space.",
                     "wasted_shards": 0,
                     "target_shards": pri_count,
                 }

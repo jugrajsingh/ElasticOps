@@ -1,6 +1,3 @@
-from datetime import UTC, datetime
-
-
 def _bytes_to_gb(num_bytes: int) -> float:
     return num_bytes / (1024**3)
 
@@ -11,13 +8,12 @@ class RecommendationEngine:
     @staticmethod
     def classify(opp: dict, analysis: dict) -> tuple[str | None, int | None]:
         opp_type = opp["type"]
-        year = analysis.get("year")
         pri_size_gb = _bytes_to_gb(analysis["pri_store_bytes"])
-        current_year = datetime.now(UTC).year
 
-        if opp_type in ("segment-fragmentation", "deleted-docs"):
-            if year and year < current_year:
-                return "force_merge", 1
+        if opp_type == "deleted-docs":
+            return "expunge_deletes", 2
+
+        if opp_type == "segment-fragmentation":
             return "force_merge", 2
 
         if opp_type == "over-sharded":
@@ -26,7 +22,7 @@ class RecommendationEngine:
             return "reduce_shards", 4
 
         if opp_type == "under-sharded":
-            return "reduce_shards", 4
+            return "split_shards", 4
 
         return None, None
 
