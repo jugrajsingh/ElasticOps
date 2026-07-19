@@ -2,12 +2,17 @@ name: Pages
 
 # DISABLED while this repository is PRIVATE - GitHub Pages requires a public repo
 # (Free plan). The site under site/ is built and ready. To ENABLE when you go public:
-#   1. Settings → Pages → Source: "GitHub Actions"
-#   2. Uncomment the `push:` trigger below.
-# The custom domain elasticops.jugraj.dev is served via the site/CNAME file plus a
-# DNS CNAME record on jugraj.dev pointing at the Pages host (same pattern as the
-# Sluice sibling project). The deploy job is also guarded to no-op unless the repo
-# is public, so a stray manual run while private won't fail.
+#   1. Settings -> Pages -> Source: "GitHub Actions", then uncomment the `push:`
+#      trigger below.
+#   2. Set the custom domain server-side (workflow-deployed Pages ignores any CNAME
+#      file, so the domain lives in repo settings, not the artifact):
+#        gh api -X PUT repos/jugrajsingh/ElasticOps/pages -f cname='elasticops.jugraj.dev' \
+#          -F https_enforced=false
+#      then, once the TLS cert has issued, re-run with -F https_enforced=true.
+#   3. DNS: add a DNS-only CNAME `elasticops -> jugrajsingh.github.io` in the jugraj.dev
+#      Cloudflare zone (mirrors sluice.jugraj.dev).
+# The deploy job is also guarded to no-op unless the repo is public, so a stray manual
+# run while private won't fail.
 
 on:
   # push:
@@ -22,7 +27,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
