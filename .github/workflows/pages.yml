@@ -1,23 +1,20 @@
 name: Pages
 
-# DISABLED while this repository is PRIVATE - GitHub Pages requires a public repo
-# (Free plan). The site under site/ is built and ready. To ENABLE when you go public:
-#   1. Settings -> Pages -> Source: "GitHub Actions", then uncomment the `push:`
-#      trigger below.
-#   2. Set the custom domain server-side (workflow-deployed Pages ignores any CNAME
-#      file, so the domain lives in repo settings, not the artifact):
-#        gh api -X PUT repos/jugrajsingh/ElasticOps/pages -f cname='elasticops.jugraj.dev' \
-#          -F https_enforced=false
-#      then, once the TLS cert has issued, re-run with -F https_enforced=true.
-#   3. DNS: add a DNS-only CNAME `elasticops -> jugrajsingh.github.io` in the jugraj.dev
-#      Cloudflare zone (mirrors sluice.jugraj.dev).
+# LIVE - the repository is public and Pages deploys on every push to main that
+# touches site/ or this workflow. Custom domain (elasticops.jugraj.dev) is set
+# server-side via the Pages API (workflow-deployed Pages ignores any CNAME file,
+# so the domain lives in repo settings, not the artifact):
+#   gh api -X PUT repos/jugrajsingh/ElasticOps/pages -f cname='elasticops.jugraj.dev' \
+#     -F https_enforced=true
+# DNS: elasticops -> jugrajsingh.github.io CNAME already present in the jugraj.dev
+# Cloudflare zone (mirrors sluice.jugraj.dev).
 # The deploy job is also guarded to no-op unless the repo is public, so a stray manual
-# run while private won't fail.
+# run against a re-privatized repo won't fail.
 
 on:
-  # push:
-  #   branches: [main]
-  #   paths: ["site/**", ".github/workflows/pages.yml"]
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
