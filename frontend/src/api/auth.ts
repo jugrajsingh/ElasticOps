@@ -112,3 +112,22 @@ export function useUpdateUserClusters() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }),
   })
 }
+
+export function useSetUserActive() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ userId, isActive }: { userId: number; isActive: boolean }) =>
+      apiFetch<UserDetail>(`/api/admin/users/${userId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_active: isActive }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }),
+  })
+}
+
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (data: { current_password: string; new_password: string }) =>
+      apiFetch("/api/auth/me/password", { method: "POST", body: JSON.stringify(data) }),
+  })
+}

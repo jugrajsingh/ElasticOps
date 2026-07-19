@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react"
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react"
 import { useMe, type UserInfo } from "@/api/auth"
+import { UNAUTHORIZED_EVENT } from "@/api/client"
 
 interface AuthContextValue {
   token: string | null
@@ -28,6 +29,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     setToken(null)
+  }, [setToken])
+
+  // apiFetch dispatches this when a 401 comes back on an authenticated call. localStorage is
+  // already cleared by then; this clears the in-memory token so isAuthenticated flips immediately
+  // and ProtectedRoute redirects to /login, instead of the app looking "stuck" until a manual refresh.
+  useEffect(() => {
+    const handleUnauthorized = () => setToken(null)
+    window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
   }, [setToken])
 
   return (
