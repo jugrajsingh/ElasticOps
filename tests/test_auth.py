@@ -1,3 +1,6 @@
+from datetime import UTC, datetime, timedelta
+
+import jwt
 from httpx import AsyncClient
 
 
@@ -87,6 +90,31 @@ async def test_should_return_me_with_valid_token(client: AsyncClient, admin_head
 
 async def test_should_reject_unauthenticated_cluster_list(client: AsyncClient):
     response = await client.get("/api/clusters")
+    assert response.status_code == 401
+
+
+async def test_should_reject_malformed_token(client: AsyncClient):
+    response = await client.get(
+        "/api/auth/me",
+        headers={"Authorization": "Bearer not-a-valid-jwt"},
+    )
+    assert response.status_code == 401
+
+
+async def test_should_reject_expired_token(client: AsyncClient):
+    from backend.services.secrets import get_jwt_secret
+    from config.settings import get_settings
+
+    settings = get_settings()
+    expired = jwt.encode(
+        {"sub": "admin@test.com", "exp": datetime.now(UTC) - timedelta(minutes=1)},
+        get_jwt_secret(),
+        algorithm=settings.auth.jwt_algorithm,
+    )
+    response = await client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {expired}"},
+    )
     assert response.status_code == 401
 
 

@@ -13,15 +13,15 @@ def test_empty_password_is_passthrough():
 
 
 def test_jwt_secret_uses_configured_override():
-    # conftest sets AUTH__JWT_SECRET=test-jwt-secret
-    assert secrets_mod.get_jwt_secret() == "test-jwt-secret"
+    # conftest sets AUTH__JWT_SECRET=test-jwt-secret-with-at-least-32-bytes!
+    assert secrets_mod.get_jwt_secret() == "test-jwt-secret-with-at-least-32-bytes!"
 
 
 def test_create_token_uses_runtime_secret():
-    from jose import jwt
+    import jwt
 
     from backend.auth import create_access_token
 
     token = create_access_token({"sub": "a@b.com"})
-    decoded = jwt.decode(token, "test-jwt-secret", algorithms=["HS256"])
+    decoded = jwt.decode(token, "test-jwt-secret-with-at-least-32-bytes!", algorithms=["HS256"])
     assert decoded["sub"] == "a@b.com"

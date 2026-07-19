@@ -142,3 +142,97 @@ async def test_should_prevent_deleting_last_admin(client: AsyncClient, admin_hea
 
     response = await client.delete(f"/api/admin/users/{admin_id}", headers=admin_headers)
     assert response.status_code == 400
+
+
+async def test_should_deactivate_user(client: AsyncClient, admin_headers: dict):
+    invite = await client.post(
+        "/api/admin/users",
+        headers=admin_headers,
+        json={
+            "name": "User1",
+            "email": "user1@test.com",
+            "password": "pass1234",
+        },
+    )
+    user_id = invite.json()["id"]
+
+    response = await client.patch(
+        f"/api/admin/users/{user_id}",
+        headers=admin_headers,
+        json={"is_active": False},
+    )
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+
+    # Persisted: deactivated user cannot log in.
+    login = await client.post(
+        "/api/auth/login",
+        json={"email": "user1@test.com", "password": "pass1234"},
+    )
+    assert login.status_code == 401
+
+
+async def test_should_reactivate_user(client: AsyncClient, admin_headers: dict):
+    invite = await client.post(
+        "/api/admin/users",
+        headers=admin_headers,
+        json={
+            "name": "User1",
+            "email": "user1@test.com",
+            "password": "pass1234",
+        },
+    )
+    user_id = invite.json()["id"]
+
+    await client.patch(
+        f"/api/admin/users/{user_id}",
+        headers=admin_headers,
+        json={"is_active": False},
+    )
+    response = await client.patch(
+        f"/api/admin/users/{user_id}",
+        headers=admin_headers,
+        json={"is_active": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["is_active"] is True
+
+    login = await client.post(
+        "/api/auth/login",
+        json={"email": "user1@test.com", "password": "pass1234"},
+    )
+    assert login.status_code == 200
+
+
+async def test_should_404_when_setting_active_on_missing_user(client: AsyncClient, admin_headers: dict):
+    response = await client.patch(
+        "/api/admin/users/99999",
+        headers=admin_headers,
+        json={"is_active": False},
+    )
+    assert response.status_code == 404
+
+
+async def test_should_reject_non_admin_from_setting_active(client: AsyncClient, admin_headers: dict):
+    invite = await client.post(
+        "/api/admin/users",
+        headers=admin_headers,
+        json={
+            "name": "User1",
+            "email": "user1@test.com",
+            "password": "pass1234",
+        },
+    )
+    user_id = invite.json()["id"]
+    token_resp = await client.post(
+        "/api/auth/login",
+        json={"email": "user1@test.com", "password": "pass1234"},
+    )
+    user_headers = {"Authorization": f"Bearer {token_resp.json()['access_token']}"}
+
+    response = await client.patch(
+        f"/api/admin/users/{user_id}",
+        headers=user_headers,
+        json={"is_active": False},
+    )
+    assert response.status_code == 403

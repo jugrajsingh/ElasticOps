@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,7 @@ from backend.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
+from backend.services.rate_limit import login_throttle
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -54,16 +55,21 @@ async def setup(body: SetupRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    key = f"{request.client.host if request.client else '?'}:{body.email}"
+    login_throttle.check(key)
+
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(body.password, user.password_hash):
+        login_throttle.record_failure(key)
         raise HTTPException(401, "Invalid email or password")
 
     if not user.is_active:
         raise HTTPException(401, "Account deactivated")
 
+    login_throttle.reset(key)
     return TokenResponse(access_token=create_access_token({"sub": user.email}))
 
 

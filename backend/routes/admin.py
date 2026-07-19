@@ -6,7 +6,7 @@ from backend.auth import hash_password, require_admin
 from backend.database import get_db
 from backend.models.user import User
 from backend.models.user_cluster import UserCluster
-from backend.schemas.auth import InviteRequest, UserDetailResponse
+from backend.schemas.auth import InviteRequest, UserActiveUpdate, UserDetailResponse
 
 router = APIRouter(prefix="/api/admin/users", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -84,6 +84,35 @@ async def update_user_clusters(
 
     await db.commit()
     return {"detail": "Cluster access updated"}
+
+
+@router.patch("/{user_id}", response_model=UserDetailResponse)
+async def set_user_active(
+    user_id: int,
+    body: UserActiveUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    user = await _get_user(user_id, db)
+    if user.id == admin.id and not body.is_active:
+        raise HTTPException(400, "Cannot deactivate yourself")
+
+    user.is_active = body.is_active
+    await db.commit()
+    await db.refresh(user)
+
+    cluster_result = await db.execute(select(UserCluster.cluster_id).where(UserCluster.user_id == user.id))
+    cluster_ids = [row[0] for row in cluster_result.all()]
+
+    return UserDetailResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role,
+        is_active=user.is_active,
+        cluster_ids=cluster_ids,
+        created_at=user.created_at,
+    )
 
 
 @router.delete("/{user_id}")

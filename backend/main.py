@@ -14,6 +14,9 @@ from backend.auth import hash_password
 from backend.database import async_session_factory, init_db
 from backend.models.user import User
 from backend.routes import admin, auth, clusters, es, health, jobs
+from backend.services.job_runner import JobRunner
+from backend.services.poller import ClusterPollManager
+from config.settings import get_settings
 
 logger = logging.getLogger("elasticops")
 
@@ -48,10 +51,30 @@ async def _ensure_default_admin() -> None:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     await _ensure_default_admin()
-    yield
+
+    manager: ClusterPollManager | None = None
+    if get_settings().polling.enabled:
+        manager = ClusterPollManager()
+        # start_all tolerates unreachable clusters (each poller swallows cycle errors), so
+        # a down cluster never blocks app startup.
+        await manager.start_all()
+        app.state.poll_manager = manager
+
+    # Single app-wide job runner: max_concurrent acts as a global cap across all jobs. recover()
+    # re-submits any job left in 'executing' after a restart.
+    app.state.job_runner = JobRunner()
+    await app.state.job_runner.recover()
+
+    try:
+        yield
+    finally:
+        # Shut down in reverse start order: stop the job runner before the poll manager.
+        await app.state.job_runner.stop_all()
+        if manager is not None:
+            await manager.stop_all()
 
 
 app = FastAPI(
