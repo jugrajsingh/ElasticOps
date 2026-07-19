@@ -11,7 +11,7 @@ COPY frontend/ .
 RUN npm run build
 
 # Stage 2: Build Python dependencies
-FROM python:3.12-alpine AS backend-builder
+FROM python:3.14-alpine AS backend-builder
 COPY --from=ghcr.io/astral-sh/uv:0.11.19 /uv /bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
@@ -20,7 +20,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Stage 3: Production runtime
-FROM python:3.12-alpine AS runtime
+FROM python:3.14-alpine AS runtime
 WORKDIR /app
 
 RUN addgroup -g 1000 appuser && adduser -u 1000 -G appuser -D appuser
