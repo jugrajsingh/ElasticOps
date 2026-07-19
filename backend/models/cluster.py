@@ -16,4 +16,5 @@ class Cluster(Base):
     password_encrypted: Mapped[str] = mapped_column(Text, default="")
     verify_ssl: Mapped[bool] = mapped_column(Boolean, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    read_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -9,6 +9,7 @@ class ClusterCreate(BaseModel):
     username: str = ""
     password: str = ""
     verify_ssl: bool = True
+    read_only: bool = False
 
 
 class ClusterUpdate(BaseModel):
@@ -17,6 +18,8 @@ class ClusterUpdate(BaseModel):
     username: str | None = None
     password: str | None = None
     verify_ssl: bool | None = None
+    read_only: bool | None = None
+    is_active: bool | None = None
 
 
 class ClusterResponse(BaseModel):
@@ -26,6 +29,7 @@ class ClusterResponse(BaseModel):
     username: str
     verify_ssl: bool
     is_active: bool
+    read_only: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
