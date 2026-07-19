@@ -5,7 +5,7 @@ description = "Elasticsearch cluster operations dashboard"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
+    "uvicorn[standard]>=0.51.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "aiosqlite>=0.20.0",
     "pydantic>=2.0",
