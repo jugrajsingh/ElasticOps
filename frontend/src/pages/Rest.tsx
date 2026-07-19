@@ -23,7 +23,12 @@ export default function Rest() {
     return <div className="flex items-center justify-center h-full text-eo-stone">Select a cluster</div>
   }
 
+  // On a read-only cluster only read verbs are permitted; the backend rejects everything else with 403.
+  const isReadVerb = method === "GET" || method === "HEAD"
+  const writeBlocked = !!activeCluster.read_only && !isReadVerb
+
   const handleSubmit = () => {
+    if (writeBlocked) return
     proxy.mutate({ method, path, body })
   }
 
@@ -74,10 +79,17 @@ export default function Rest() {
           />
           <button
             onClick={handleSubmit}
-            disabled={proxy.isPending}
-            className="px-4 py-2 bg-eo-amber text-eo-bg rounded text-sm font-semibold hover:bg-eo-light-amber transition-colors disabled:opacity-50"
+            disabled={proxy.isPending || writeBlocked}
+            title={writeBlocked ? "Cluster is read-only — only GET/HEAD requests are allowed" : undefined}
+            className="px-4 py-2 bg-eo-amber text-eo-bg rounded text-sm font-semibold hover:bg-eo-light-amber transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >{proxy.isPending ? "Sending..." : "Send"}</button>
         </div>
+
+        {writeBlocked && (
+          <p className="text-xs text-eo-brick font-mono">
+            This cluster is read-only. Only GET/HEAD requests are allowed.
+          </p>
+        )}
 
         {/* Body editor (for POST/PUT) */}
         {(method === "POST" || method === "PUT") && (

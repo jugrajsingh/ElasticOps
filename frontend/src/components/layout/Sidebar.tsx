@@ -3,6 +3,7 @@ import { NavLink } from "react-router-dom"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/context/AuthContext"
 import { useClusterContext } from "@/context/ClusterContext"
+import { useDeleteCluster } from "@/api/clusters"
 import ClusterDialog from "@/components/ClusterDialog"
 
 interface NavItem {
@@ -16,7 +17,7 @@ const navItems: NavItem[] = [
   { path: "/shard-map", label: "Shard Map", icon: "grid_view" },
   { path: "/indices", label: "Indices", icon: "list_alt" },
   { path: "/nodes", label: "Nodes", icon: "dns" },
-  { path: "/jobs", label: "Jobs", icon: "bolt" },
+  { path: "/jobs", label: "Suggestions", icon: "bolt" },
 ]
 
 interface SidebarProps {
@@ -94,14 +95,39 @@ function SidebarLink({ item, collapsed }: { item: NavItem; collapsed: boolean })
 
 function ClusterSelector({ collapsed }: { collapsed: boolean }) {
   const { clusters, activeCluster, setActiveClusterId } = useClusterContext()
+  const { isAdmin } = useAuth()
+  const deleteCluster = useDeleteCluster()
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+
+  const openAdd = () => {
+    setEditing(false)
+    setDialogOpen(true)
+  }
+
+  const openEdit = () => {
+    setEditing(true)
+    setDialogOpen(true)
+  }
+
+  const handleRemove = () => {
+    if (!activeCluster) return
+    if (!window.confirm(`Remove cluster "${activeCluster.name}"? This deletes its analysis history and cannot be undone.`)) return
+    const removedId = activeCluster.id
+    deleteCluster.mutate(removedId, {
+      onSuccess: () => {
+        const next = clusters.find((c) => c.id !== removedId)
+        if (next) setActiveClusterId(next.id)
+      },
+    })
+  }
 
   return (
     <>
       <div className="border-t border-eo-border px-3 py-3">
         {collapsed ? (
           <div className="flex justify-center">
-            <button onClick={() => setDialogOpen(true)} className="group">
+            <button onClick={openAdd} className="group">
               <span className={cn(
                 "w-2 h-2 rounded-full block",
                 activeCluster ? "bg-eo-sage group-hover:bg-eo-amber" : "bg-eo-muted group-hover:bg-eo-amber",
@@ -110,18 +136,39 @@ function ClusterSelector({ collapsed }: { collapsed: boolean }) {
           </div>
         ) : (
           <div className="space-y-2">
-            <select
-              value={activeCluster?.id ?? ""}
-              onChange={(e) => setActiveClusterId(Number(e.target.value))}
-              className="w-full bg-eo-bg border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-stone focus:border-eo-amber focus:outline-none"
-            >
-              {clusters.length === 0 && <option value="">No clusters</option>}
-              {clusters.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
+            <div className="flex items-center gap-1">
+              <select
+                value={activeCluster?.id ?? ""}
+                onChange={(e) => setActiveClusterId(Number(e.target.value))}
+                className="flex-1 min-w-0 bg-eo-bg border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-stone focus:border-eo-amber focus:outline-none"
+              >
+                {clusters.length === 0 && <option value="">No clusters</option>}
+                {clusters.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              {activeCluster && isAdmin && (
+                <>
+                  <button
+                    onClick={openEdit}
+                    title="Edit cluster"
+                    className="flex-shrink-0 p-1 text-eo-muted hover:text-eo-amber border border-eo-border rounded transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-[14px]">edit</span>
+                  </button>
+                  <button
+                    onClick={handleRemove}
+                    title="Remove cluster"
+                    disabled={deleteCluster.isPending}
+                    className="flex-shrink-0 p-1 text-eo-muted hover:text-eo-brick border border-eo-border rounded transition-colors disabled:opacity-50"
+                  >
+                    <span className="material-symbols-outlined text-[14px]">delete</span>
+                  </button>
+                </>
+              )}
+            </div>
             <button
-              onClick={() => setDialogOpen(true)}
+              onClick={openAdd}
               className="w-full flex items-center justify-center gap-1 py-1 text-[10px] text-eo-muted hover:text-eo-amber border border-eo-border rounded transition-colors"
             >
               <span className="material-symbols-outlined text-[14px]">add</span>
@@ -130,7 +177,7 @@ function ClusterSelector({ collapsed }: { collapsed: boolean }) {
           </div>
         )}
       </div>
-      <ClusterDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+      <ClusterDialog open={dialogOpen} onClose={() => setDialogOpen(false)} cluster={editing ? activeCluster : null} />
     </>
   )
 }

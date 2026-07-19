@@ -1,7 +1,9 @@
 import { useClusterContext } from "@/context/ClusterContext"
 import { useOverview } from "@/api/es"
+import { getErrorMessage } from "@/api/client"
 import { formatBytes, formatNumber, diskColor, diskTextColor } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 const STORAGE_COLORS = [
   "bg-eo-amber",
@@ -33,7 +35,7 @@ const STORAGE_DOT_COLORS = [
 
 export default function Overview() {
   const { activeCluster } = useClusterContext()
-  const { data, isLoading } = useOverview(activeCluster?.id ?? null)
+  const { data, isError, error, refetch } = useOverview(activeCluster?.id ?? null)
 
   if (!activeCluster) {
     return (
@@ -43,10 +45,15 @@ export default function Overview() {
     )
   }
 
-  if (isLoading || !data) {
+  // Snapshot-first: render as soon as a snapshot exists. Only the very first load (no snapshot yet)
+  // shows a thin placeholder instead of a blocking spinner — staleness lives in the TopBar.
+  if (!data) {
+    if (isError) {
+      return <QueryError message={getErrorMessage(error)} onRetry={refetch} />
+    }
     return (
-      <div className="flex items-center justify-center h-full text-eo-stone">
-        Loading cluster data...
+      <div className="flex items-center justify-center h-full text-eo-muted text-xs font-mono">
+        Loading cluster snapshot…
       </div>
     )
   }

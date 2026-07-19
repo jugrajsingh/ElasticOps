@@ -1,19 +1,13 @@
 import { useState, useMemo } from "react"
 import { useClusterContext } from "@/context/ClusterContext"
-import { useNodes, useShards, type ShardInfo } from "@/api/es"
+import { useNodes, useShards } from "@/api/es"
+import { useJobs, useDrainNode, useCancelJob, type Job } from "@/api/jobs"
+import { ApiError, getErrorMessage } from "@/api/client"
 import { formatBytes, formatPercent, diskColor, diskTextColor } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 const ROLE_FILTER_OPTIONS = ["All", "hot", "warm", "cold", "data", "master", "coord"] as const
-
-function formatRole(role: string): string {
-  if (role === "coord" || role === "-" || role === "") return "coord"
-  if (role === "m") return "master"
-  if (role.includes("h")) return "hot"
-  if (role.includes("w")) return "warm"
-  if (role.includes("d")) return "data"
-  return role
-}
 
 function DiskBar({ percent }: { percent: number }) {
   const color = percent > 85 ? "bg-eo-brick" : percent >= 70 ? "bg-eo-terracotta" : "bg-eo-sage"
@@ -29,26 +23,16 @@ type SortDir = "asc" | "desc"
 
 export default function Nodes() {
   const { activeCluster } = useClusterContext()
-  const { data: nodes } = useNodes(activeCluster?.id ?? null)
+  const { data: nodes, isError: nodesError, error: nodesErrorObj, refetch: refetchNodes } = useNodes(activeCluster?.id ?? null)
+  // Raw shards power only the detail panel's "top shards on node" list — never the hot list render.
   const { data: shards } = useShards(activeCluster?.id ?? null)
+  // Jobs auto-refetch (5s) so live drain progress and the executing-state controls stay current.
+  const { data: jobs } = useJobs(activeCluster?.id ?? null)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const [filter, setFilter] = useState("")
   const [roleFilter, setRoleFilter] = useState<string>("All")
   const [sortKey, setSortKey] = useState<SortKey>("name")
   const [sortDir, setSortDir] = useState<SortDir>("asc")
-
-  const shardsByNode = useMemo(() => {
-    if (!shards) return new Map<string, ShardInfo[]>()
-    const map = new Map<string, ShardInfo[]>()
-    for (const s of shards) {
-      if (s.node) {
-        const list = map.get(s.node) ?? []
-        list.push(s)
-        map.set(s.node, list)
-      }
-    }
-    return map
-  }, [shards])
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -61,7 +45,7 @@ export default function Nodes() {
 
   const filteredNodes = (nodes ?? []).filter((n) => {
     const matchesText = !filter || n.name.toLowerCase().includes(filter.toLowerCase()) || n.role.includes(filter)
-    const matchesRole = roleFilter === "All" || formatRole(n.role) === roleFilter
+    const matchesRole = roleFilter === "All" || n.tier === roleFilter
     return matchesText && matchesRole
   })
 
@@ -70,13 +54,13 @@ export default function Nodes() {
       switch (sortKey) {
         case "name": return n.name
         case "ip": return n.ip
-        case "role": return formatRole(n.role)
+        case "role": return n.tier
         case "version": return n.version
         case "disk": return n.disk_used_percent
         case "heap": return n.heap_percent
         case "cpu": return n.cpu
         case "load": return n.load_1m
-        case "shards": return shardsByNode.get(n.name)?.length ?? 0
+        case "shards": return n.shard_count
         case "storage": return n.disk_used
       }
     }
@@ -86,23 +70,25 @@ export default function Nodes() {
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number)
       return sortDir === "asc" ? cmp : -cmp
     })
-  }, [filteredNodes, sortKey, sortDir, shardsByNode])
+  }, [filteredNodes, sortKey, sortDir])
 
   if (!activeCluster) {
     return <div className="flex items-center justify-center h-full text-eo-stone">Select a cluster</div>
   }
-
-  if (!nodes) {
-    return <div className="flex items-center justify-center h-full text-eo-stone">Loading nodes...</div>
+  if (!nodes && nodesError) {
+    return <QueryError message={getErrorMessage(nodesErrorObj)} onRetry={refetchNodes} />
   }
 
-  const selectedNodeData = nodes.find((n) => n.name === selectedNode)
-  const selectedNodeShards = shardsByNode.get(selectedNode ?? "") ?? []
+  const allNodes = nodes ?? []
+  const selectedNodeData = allNodes.find((n) => n.name === selectedNode)
+  // Detail-panel only: raw shards owned by the selected node (lazily, off the hot list render).
+  const selectedNodeShards = (shards ?? []).filter((s) => s.node === selectedNode)
 
-  // Role summaries
-  const masterNodes = nodes.filter((n) => n.role.includes("m"))
-  const dataNodes = nodes.filter((n) => n.role.includes("d"))
-  const coordNodes = nodes.filter((n) => !n.role.includes("d") && !n.role.includes("m"))
+  // Role summaries use the precomputed authoritative `tier` from the backend — no naive role-substring
+  // matching (which miscounts "coord" as data and drops "his" hot nodes).
+  const masterNodes = allNodes.filter((n) => n.tier === "master")
+  const dataNodes = allNodes.filter((n) => ["hot", "warm", "cold", "data"].includes(n.tier))
+  const coordNodes = allNodes.filter((n) => n.tier === "coord")
 
   return (
     <div className="flex h-full">
@@ -155,7 +141,7 @@ export default function Nodes() {
             </thead>
             <tbody>
               {sortedNodes.map((node) => {
-                const nodeShardCount = shardsByNode.get(node.name)?.length ?? 0
+                const nodeShardCount = node.shard_count
                 return (
                   <tr
                     key={node.name}
@@ -172,7 +158,7 @@ export default function Nodes() {
                     </td>
                     <td className="py-2 pr-3 text-eo-cream">{node.name}</td>
                     <td className="py-2 pr-3 text-eo-stone">{node.ip}</td>
-                    <td className="py-2 pr-3 text-eo-stone">{formatRole(node.role)}</td>
+                    <td className="py-2 pr-3 text-eo-stone">{node.tier}</td>
                     <td className="py-2 pr-3 text-eo-stone">{node.version}</td>
                     <td className="py-2 pr-3 text-right">
                       <span className={diskTextColor(node.disk_used_percent)}>{formatPercent(node.disk_used_percent)}</span>
@@ -200,7 +186,7 @@ export default function Nodes() {
               <div>
                 <div className="text-xs text-eo-muted font-mono">Nodes &gt; {selectedNodeData.name}</div>
                 <h2 className="text-lg font-semibold text-eo-cream mt-1">{selectedNodeData.name}</h2>
-                <div className="text-xs text-eo-stone font-mono mt-1">{selectedNodeData.ip} &middot; {formatRole(selectedNodeData.role)} &middot; {selectedNodeData.version}</div>
+                <div className="text-xs text-eo-stone font-mono mt-1">{selectedNodeData.ip} &middot; {selectedNodeData.tier} &middot; {selectedNodeData.version}</div>
               </div>
               <button onClick={() => setSelectedNode(null)} className="text-eo-muted hover:text-eo-cream">
                 <span className="material-symbols-outlined text-[20px]">close</span>
@@ -218,6 +204,20 @@ export default function Nodes() {
               <DetailMetric label="Shards" value={selectedNodeShards.length.toString()} sub="on this node" />
               <DetailMetric label="Segments" value={selectedNodeData.segments_count.toString()} sub="total" />
             </div>
+
+            {/* Drain / undrain controls — hidden on read-only clusters */}
+            {activeCluster.id !== undefined && !activeCluster.read_only && (
+              <DrainControls
+                clusterId={activeCluster.id}
+                nodeName={selectedNodeData.name}
+                drainJob={(jobs ?? []).find(
+                  (j) =>
+                    j.job_type === "drain_node" &&
+                    j.status === "executing" &&
+                    j.node_name === selectedNodeData.name,
+                )}
+              />
+            )}
 
             {/* Top shards on node */}
             <div>
@@ -273,6 +273,88 @@ function SortHeader({ label, sortKey: key, current, dir, onSort, align }: {
       {label}
       {active && <span className="ml-1 text-eo-amber">{dir === "asc" ? "\u25B2" : "\u25BC"}</span>}
     </th>
+  )
+}
+
+function DrainControls({ clusterId, nodeName, drainJob }: {
+  clusterId: number; nodeName: string; drainJob?: Job
+}) {
+  const drain = useDrainNode(clusterId)
+  const cancel = useCancelJob(clusterId)
+  // Inline two-step confirm (no window.confirm): first click arms, second click drains.
+  const [confirming, setConfirming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // A drain is already running on this node — show live progress + undrain.
+  if (drainJob) {
+    return (
+      <div className="bg-eo-bg rounded p-3 border border-eo-terracotta/40">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-eo-terracotta font-mono">Draining</div>
+            <div className="text-xs text-eo-cream font-mono mt-1">{drainJob.progress ?? "starting"}</div>
+          </div>
+          <button
+            onClick={() => cancel.mutate(drainJob.id)}
+            disabled={cancel.isPending}
+            className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-cream hover:border-eo-amber hover:text-eo-amber transition-colors disabled:opacity-50"
+          >
+            {cancel.isPending ? "Undraining…" : "Undrain"}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const handleDrain = () => {
+    setError(null)
+    drain.mutate(
+      { node: nodeName },
+      {
+        onSuccess: () => setConfirming(false),
+        onError: (err) => {
+          setConfirming(false)
+          setError(err instanceof ApiError ? err.detail : "Drain failed")
+        },
+      },
+    )
+  }
+
+  return (
+    <div className="bg-eo-bg rounded p-3">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-wider text-eo-muted font-mono">Maintenance</div>
+        {!confirming ? (
+          <button
+            onClick={() => { setError(null); setConfirming(true) }}
+            className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-cream hover:border-eo-terracotta hover:text-eo-terracotta transition-colors"
+          >
+            Drain Node
+          </button>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-eo-stone font-mono">Drain {nodeName}?</span>
+            <button
+              onClick={handleDrain}
+              disabled={drain.isPending}
+              className="px-3 py-1.5 text-xs font-mono rounded bg-eo-terracotta/20 border border-eo-terracotta text-eo-terracotta hover:bg-eo-terracotta/30 transition-colors disabled:opacity-50"
+            >
+              {drain.isPending ? "Draining…" : "Confirm"}
+            </button>
+            <button
+              onClick={() => setConfirming(false)}
+              disabled={drain.isPending}
+              className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-stone hover:text-eo-cream transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+      {error && (
+        <div className="mt-2 text-xs text-eo-brick font-mono">{error}</div>
+      )}
+    </div>
   )
 }
 

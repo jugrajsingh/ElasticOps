@@ -1,8 +1,11 @@
-import { useState, useMemo } from "react"
+import { useState } from "react"
 import { useClusterContext } from "@/context/ClusterContext"
-import { useAnalysis, useShards, type ShardInfo } from "@/api/es"
+import { useAnalysis, useShards } from "@/api/es"
+import { usePromoteIndex, useReindex } from "@/api/jobs"
+import { getErrorMessage } from "@/api/client"
 import { formatBytes, formatNumber, healthColor } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 const SEVERITY_STYLES: Record<string, string> = {
   high: "bg-eo-brick/20 text-eo-brick border-eo-brick",
@@ -41,7 +44,8 @@ function SortHeader({ label, sortKey: key, current, dir, onSort, align }: {
 export default function Indices() {
   const { activeCluster } = useClusterContext()
   const [problemsOnly, setProblemsOnly] = useState(false)
-  const { data: analysis } = useAnalysis(activeCluster?.id ?? null, problemsOnly)
+  const { data: analysis, isError, error, refetch } = useAnalysis(activeCluster?.id ?? null, problemsOnly)
+  // Raw shards power only the detail panel's shard-distribution table, not the index list render.
   const { data: shards } = useShards(activeCluster?.id ?? null)
   const [selectedIndex, setSelectedIndex] = useState<string | null>(null)
   const [filter, setFilter] = useState("")
@@ -58,22 +62,15 @@ export default function Indices() {
     }
   }
 
-  const shardsByIndex = useMemo(() => {
-    if (!shards) return new Map<string, ShardInfo[]>()
-    const map = new Map<string, ShardInfo[]>()
-    for (const s of shards) {
-      const list = map.get(s.index) ?? []
-      list.push(s)
-      map.set(s.index, list)
-    }
-    return map
-  }, [shards])
-
   if (!activeCluster) {
     return <div className="flex items-center justify-center h-full text-eo-stone">Select a cluster</div>
   }
+  // Snapshot-first: the analyzer output is precomputed server-side; render once the snapshot lands.
   if (!analysis) {
-    return <div className="flex items-center justify-center h-full text-eo-stone">Analyzing indices...</div>
+    if (isError) {
+      return <QueryError message={getErrorMessage(error)} onRetry={refetch} />
+    }
+    return <div className="flex items-center justify-center h-full text-eo-muted text-xs font-mono">Loading indices snapshot…</div>
   }
 
   const indices = analysis.indices
@@ -102,7 +99,7 @@ export default function Indices() {
   const totalSize = indices.reduce((sum, i) => sum + i.pri_store_bytes, 0)
 
   const selectedData = indices.find((i) => i.name === selectedIndex)
-  const selectedShards = shardsByIndex.get(selectedIndex ?? "") ?? []
+  const selectedShards = (shards ?? []).filter((s) => s.index === selectedIndex)
 
   return (
     <div className="flex h-full">
@@ -272,6 +269,14 @@ export default function Indices() {
               </button>
             </div>
 
+            {/* Operator actions — hidden on read-only clusters */}
+            {!activeCluster.read_only && (
+              <IndexOperatorActions
+                clusterId={activeCluster.id}
+                indexName={selectedData.name}
+              />
+            )}
+
             {/* Shard distribution */}
             <div>
               <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono mb-2">Shard Distribution</h3>
@@ -308,6 +313,180 @@ export default function Indices() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type ActionPanel = "none" | "reindex" | "promote"
+
+function IndexOperatorActions({ clusterId, indexName }: { clusterId: number; indexName: string }) {
+  const [panel, setPanel] = useState<ActionPanel>("none")
+
+  // Reindex state
+  const [reindexDest, setReindexDest] = useState("")
+  const reindex = useReindex(clusterId)
+
+  // Promote state
+  const [promoteTarget, setPromoteTarget] = useState("")
+  const [promoteAlias, setPromoteAlias] = useState("")
+  const [promoteDelete, setPromoteDelete] = useState(false)
+  const promote = usePromoteIndex(clusterId)
+
+  function openPanel(p: ActionPanel) {
+    setPanel((prev) => (prev === p ? "none" : p))
+    reindex.reset()
+    promote.reset()
+  }
+
+  function handleReindex() {
+    if (!reindexDest.trim()) return
+    reindex.mutate(
+      { source: indexName, dest: reindexDest.trim() },
+      { onSuccess: () => { setReindexDest(""); setPanel("none") } },
+    )
+  }
+
+  function handlePromote() {
+    if (!promoteTarget.trim() || !promoteAlias.trim()) return
+    promote.mutate(
+      { source: indexName, target: promoteTarget.trim(), alias: promoteAlias.trim(), delete_source: promoteDelete },
+      { onSuccess: () => { setPromoteTarget(""); setPromoteAlias(""); setPromoteDelete(false); setPanel("none") } },
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <button
+          onClick={() => openPanel("reindex")}
+          className={cn(
+            "px-3 py-1.5 rounded text-xs font-mono border transition-colors",
+            panel === "reindex"
+              ? "border-eo-amber text-eo-amber bg-eo-amber/10"
+              : "border-eo-border text-eo-stone hover:text-eo-cream hover:border-eo-stone",
+          )}
+        >
+          Reindex…
+        </button>
+        <button
+          onClick={() => openPanel("promote")}
+          className={cn(
+            "px-3 py-1.5 rounded text-xs font-mono border transition-colors",
+            panel === "promote"
+              ? "border-eo-amber text-eo-amber bg-eo-amber/10"
+              : "border-eo-border text-eo-stone hover:text-eo-cream hover:border-eo-stone",
+          )}
+        >
+          Promote…
+        </button>
+      </div>
+
+      {panel === "reindex" && (
+        <div className="bg-eo-bg rounded border border-eo-border p-3 space-y-2">
+          <p className="text-[10px] font-mono text-eo-muted uppercase tracking-wider">Reindex</p>
+          <p className="text-[11px] text-eo-stone font-mono">
+            Copy <span className="text-eo-cream">{indexName}</span> into a new index (async, polled).
+          </p>
+          <label className="text-[10px] font-mono text-eo-stone block">Destination index name</label>
+          <input
+            type="text"
+            placeholder="e.g. logs-2024-reindexed"
+            value={reindexDest}
+            onChange={(e) => setReindexDest(e.target.value)}
+            className="w-full bg-eo-surface border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream placeholder:text-eo-muted focus:border-eo-amber focus:outline-none"
+            disabled={reindex.isPending}
+          />
+          {reindex.isError && (
+            <p className="text-[10px] font-mono text-eo-brick">
+              {reindex.error instanceof Error ? reindex.error.message : "Reindex failed."}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={handleReindex}
+              disabled={!reindexDest.trim() || reindex.isPending}
+              className={cn(
+                "flex-1 px-3 py-1.5 text-xs font-mono rounded border transition-colors",
+                !reindexDest.trim() || reindex.isPending
+                  ? "bg-eo-amber/10 text-eo-amber/40 border-eo-amber/20 cursor-not-allowed"
+                  : "bg-eo-amber/20 text-eo-amber border-eo-amber/40 hover:bg-eo-amber/30 cursor-pointer",
+              )}
+            >
+              {reindex.isPending ? "Queuing…" : "Start Reindex"}
+            </button>
+            <button
+              onClick={() => setPanel("none")}
+              disabled={reindex.isPending}
+              className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-stone hover:text-eo-cream transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {panel === "promote" && (
+        <div className="bg-eo-bg rounded border border-eo-border p-3 space-y-2">
+          <p className="text-[10px] font-mono text-eo-muted uppercase tracking-wider">Promote Index</p>
+          <p className="text-[11px] text-eo-stone font-mono">
+            Atomically swap alias from <span className="text-eo-cream">{indexName}</span> to the target index.
+          </p>
+          <label className="text-[10px] font-mono text-eo-stone block">Target index</label>
+          <input
+            type="text"
+            placeholder="e.g. logs-2024-shrink-1"
+            value={promoteTarget}
+            onChange={(e) => setPromoteTarget(e.target.value)}
+            className="w-full bg-eo-surface border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream placeholder:text-eo-muted focus:border-eo-amber focus:outline-none"
+            disabled={promote.isPending}
+          />
+          <label className="text-[10px] font-mono text-eo-stone block">Alias name</label>
+          <input
+            type="text"
+            placeholder="e.g. logs-current"
+            value={promoteAlias}
+            onChange={(e) => setPromoteAlias(e.target.value)}
+            className="w-full bg-eo-surface border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream placeholder:text-eo-muted focus:border-eo-amber focus:outline-none"
+            disabled={promote.isPending}
+          />
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={promoteDelete}
+              onChange={(e) => setPromoteDelete(e.target.checked)}
+              disabled={promote.isPending}
+              className="accent-eo-brick"
+            />
+            <span className="text-[11px] font-mono text-eo-terracotta">Delete source after promote</span>
+          </label>
+          {promote.isError && (
+            <p className="text-[10px] font-mono text-eo-brick">
+              {promote.error instanceof Error ? promote.error.message : "Promote failed."}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={handlePromote}
+              disabled={!promoteTarget.trim() || !promoteAlias.trim() || promote.isPending}
+              className={cn(
+                "flex-1 px-3 py-1.5 text-xs font-mono rounded border transition-colors",
+                !promoteTarget.trim() || !promoteAlias.trim() || promote.isPending
+                  ? "bg-eo-amber/10 text-eo-amber/40 border-eo-amber/20 cursor-not-allowed"
+                  : "bg-eo-amber/20 text-eo-amber border-eo-amber/40 hover:bg-eo-amber/30 cursor-pointer",
+              )}
+            >
+              {promote.isPending ? "Queuing…" : "Promote"}
+            </button>
+            <button
+              onClick={() => setPanel("none")}
+              disabled={promote.isPending}
+              className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-stone hover:text-eo-cream transition-colors"
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}

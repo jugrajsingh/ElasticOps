@@ -7,10 +7,17 @@ import {
   useApproveJob,
   useRejectJob,
   useExecuteJob,
+  useExecuteAll,
   useBulkApprove,
+  useConcurrency,
+  useClearQueue,
+  useClearHistory,
+  type Job,
 } from "@/api/jobs"
+import { getErrorMessage } from "@/api/client"
 import { formatBytes, formatNumber } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 type JobSortKey = "tier" | "status" | "type" | "index" | "current" | "target" | "savings" | "size"
 type SortDir = "asc" | "desc"
@@ -29,12 +36,22 @@ function SortHeader({ label, sortKey: key, current, dir, onSort, align }: {
 type Tab = "recommendations" | "execution"
 
 const TIER_LABELS: Record<number, string> = { 1: "T1", 2: "T2", 3: "T3", 4: "T4" }
+
+const DETECTORS = [
+  { key: "over-sharded", label: "Over-sharded" },
+  { key: "under-sharded", label: "Under-sharded" },
+  { key: "segment-fragmentation", label: "Fragmentation" },
+  { key: "shard-imbalance", label: "Imbalance" },
+  { key: "deleted-docs", label: "Deleted docs" },
+]
 const STATUS_STYLES: Record<string, string> = {
   pending: "bg-eo-muted/20 text-eo-stone",
   approved: "bg-eo-amber/20 text-eo-amber",
+  queued: "bg-eo-amber/10 text-eo-stone",
   executing: "bg-eo-terracotta/20 text-eo-terracotta animate-pulse-terracotta",
   completed: "bg-eo-sage/20 text-eo-sage",
   failed: "bg-eo-brick/20 text-eo-brick",
+  cancelled: "bg-eo-muted/20 text-eo-muted line-through",
   rejected: "bg-eo-muted/20 text-eo-muted line-through",
 }
 
@@ -54,7 +71,7 @@ export default function Jobs() {
           onClick={() => setTab("recommendations")}
           className={cn("py-3 text-sm font-mono border-b-2 transition-colors",
             tab === "recommendations" ? "border-eo-amber text-eo-amber" : "border-transparent text-eo-stone hover:text-eo-cream")}
-        >Recommendations</button>
+        >Suggestions</button>
         <button
           onClick={() => setTab("execution")}
           className={cn("py-3 text-sm font-mono border-b-2 transition-colors",
@@ -72,7 +89,7 @@ export default function Jobs() {
 }
 
 function RecommendationsTab({ clusterId }: { clusterId: number }) {
-  const { data: jobs } = useJobs(clusterId)
+  const { data: jobs, isError, error, refetch } = useJobs(clusterId)
   const { data: summary } = useJobSummary(clusterId)
   const recommend = useRecommend(clusterId)
   const approve = useApproveJob(clusterId)
@@ -81,6 +98,13 @@ function RecommendationsTab({ clusterId }: { clusterId: number }) {
   const [tierFilter, setTierFilter] = useState<number | null>(null)
   const [sortKey, setSortKey] = useState<JobSortKey>("tier")
   const [sortDir, setSortDir] = useState<SortDir>("asc")
+  const [selectedDetectors, setSelectedDetectors] = useState<string[]>(DETECTORS.map((d) => d.key))
+
+  const toggleDetector = (key: string) => {
+    setSelectedDetectors((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    )
+  }
 
   const toggleSort = (key: JobSortKey) => {
     if (sortKey === key) {
@@ -111,36 +135,61 @@ function RecommendationsTab({ clusterId }: { clusterId: number }) {
     return sortDir === "asc" ? cmp : -cmp
   }), [filtered, sortKey, sortDir])
 
+  if (!jobs && isError) {
+    return <QueryError message={getErrorMessage(error)} onRetry={refetch} />
+  }
+
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-4">
       {/* Actions bar */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => recommend.mutate()}
-          disabled={recommend.isPending}
-          className="px-4 py-2 bg-eo-amber text-eo-bg rounded text-sm font-semibold hover:bg-eo-light-amber transition-colors disabled:opacity-50"
-        >
-          {recommend.isPending ? "Analyzing..." : "Run Analysis"}
-        </button>
-        <button
-          onClick={() => bulkApprove.mutate(tierFilter ?? undefined)}
-          className="px-3 py-2 border border-eo-border text-eo-stone rounded text-sm font-mono hover:text-eo-cream transition-colors"
-        >Approve All{tierFilter !== null ? ` T${tierFilter}` : ""}</button>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => recommend.mutate(selectedDetectors.length === DETECTORS.length ? undefined : selectedDetectors)}
+            disabled={recommend.isPending || selectedDetectors.length === 0}
+            className="px-4 py-2 bg-eo-amber text-eo-bg rounded text-sm font-semibold hover:bg-eo-light-amber transition-colors disabled:opacity-50"
+          >
+            {recommend.isPending ? "Analyzing..." : "Run Analysis"}
+          </button>
+          <button
+            onClick={() => bulkApprove.mutate(tierFilter ?? undefined)}
+            className="px-3 py-2 border border-eo-border text-eo-stone rounded text-sm font-mono hover:text-eo-cream transition-colors"
+          >Approve All{tierFilter !== null ? ` T${tierFilter}` : ""}</button>
 
-        <div className="flex gap-1 ml-4">
-          <TierButton tier={null} active={tierFilter} onClick={setTierFilter} label="All" />
-          {[1, 2, 3, 4].map((t) => (
-            <TierButton key={t} tier={t} active={tierFilter} onClick={setTierFilter} label={`T${t}`} />
-          ))}
+          <div className="flex gap-1 ml-4">
+            <TierButton tier={null} active={tierFilter} onClick={setTierFilter} label="All" />
+            {[1, 2, 3, 4].map((t) => (
+              <TierButton key={t} tier={t} active={tierFilter} onClick={setTierFilter} label={`T${t}`} />
+            ))}
+          </div>
+
+          {summary && (
+            <div className="ml-auto flex gap-4 text-xs font-mono text-eo-stone">
+              <span>{summary.total} total</span>
+              <span>{summary.pending} pending</span>
+              <span className="text-eo-amber">{summary.approved} approved</span>
+            </div>
+          )}
         </div>
 
-        {summary && (
-          <div className="ml-auto flex gap-4 text-xs font-mono text-eo-stone">
-            <span>{summary.total} total</span>
-            <span>{summary.pending} pending</span>
-            <span className="text-eo-amber">{summary.approved} approved</span>
+        {/* Detector filter chips */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono text-eo-muted">Analyze:</span>
+          <div className="flex gap-1">
+            {DETECTORS.map((d) => (
+              <button
+                key={d.key}
+                onClick={() => toggleDetector(d.key)}
+                className={cn(
+                  "px-2 py-1 rounded text-xs font-mono border transition-colors",
+                  selectedDetectors.includes(d.key)
+                    ? "border-eo-amber text-eo-amber bg-eo-amber/10"
+                    : "border-eo-border text-eo-muted hover:text-eo-stone",
+                )}
+              >{d.label}</button>
+            ))}
           </div>
-        )}
+        </div>
       </div>
 
       {/* Job table */}
@@ -201,12 +250,24 @@ function RecommendationsTab({ clusterId }: { clusterId: number }) {
 
 function ExecutionTab({ clusterId }: { clusterId: number }) {
   const { data: summary } = useJobSummary(clusterId)
-  const { data: jobs } = useJobs(clusterId)
+  const { data: jobs, isError, error, refetch } = useJobs(clusterId)
+  const { data: concurrency } = useConcurrency(clusterId)
   const execute = useExecuteJob(clusterId)
+  const executeAll = useExecuteAll(clusterId)
+  const clearQueue = useClearQueue(clusterId)
+  const clearHistory = useClearHistory(clusterId)
+  const [executeAllMsg, setExecuteAllMsg] = useState<string | null>(null)
+
+  if (!jobs && isError) {
+    return <QueryError message={getErrorMessage(error)} onRetry={refetch} />
+  }
 
   const approved = jobs?.filter((j) => j.status === "approved") ?? []
+  const queued = jobs?.filter((j) => j.status === "queued") ?? []
+  const executing = jobs?.filter((j) => j.status === "executing") ?? []
   const completed = jobs?.filter((j) => j.status === "completed") ?? []
   const failed = jobs?.filter((j) => j.status === "failed") ?? []
+  const cap = concurrency?.max_concurrent
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -225,18 +286,44 @@ function ExecutionTab({ clusterId }: { clusterId: number }) {
         <div className="bg-eo-surface border border-eo-border rounded p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono">Queue ({approved.length} approved)</h3>
-            <button
-              onClick={() => { if (approved[0]) execute.mutate(approved[0].id) }}
-              disabled={execute.isPending}
-              className="px-4 py-1.5 bg-eo-amber text-eo-bg rounded text-sm font-semibold hover:bg-eo-light-amber disabled:opacity-50"
-            >Execute Next</button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => { if (approved[0]) execute.mutate(approved[0].id) }}
+                disabled={execute.isPending}
+                className="px-4 py-1.5 bg-eo-amber text-eo-bg rounded text-sm font-semibold hover:bg-eo-light-amber disabled:opacity-50"
+              >Execute Next</button>
+              <button
+                onClick={() => {
+                  setExecuteAllMsg(null)
+                  executeAll.mutate(undefined, {
+                    onSuccess: (result) => {
+                      if (result.skipped > 0) {
+                        setExecuteAllMsg(`Queued ${result.queued} · ${result.skipped} skipped (index busy)`)
+                      } else {
+                        setExecuteAllMsg(null)
+                      }
+                    },
+                  })
+                }}
+                disabled={executeAll.isPending || approved.length === 0}
+                className="px-4 py-1.5 bg-eo-terracotta text-eo-bg rounded text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+              >Execute All</button>
+              <button
+                onClick={() => clearQueue.mutate()}
+                disabled={clearQueue.isPending}
+                className="px-4 py-1.5 border border-eo-border text-eo-stone rounded text-sm font-semibold hover:text-eo-cream hover:border-eo-muted disabled:opacity-50"
+              >Clear Queue</button>
+            </div>
           </div>
-          <div className="space-y-1">
-            {approved.slice(0, 5).map((job) => (
+          {executeAllMsg && (
+            <p className="text-xs font-mono text-eo-stone mt-1">{executeAllMsg}</p>
+          )}
+          <div className="space-y-1 mt-2">
+            {approved.slice(0, 50).map((job) => (
               <div key={job.id} className="flex items-center gap-3 text-xs font-mono text-eo-stone py-1">
                 <span className="text-eo-amber font-semibold">{TIER_LABELS[job.tier]}</span>
                 <span>{job.job_type}</span>
-                <span className="truncate flex-1">{job.index_name}</span>
+                <JobDestination job={job} />
                 <span>{formatBytes(job.pri_store_bytes)}</span>
               </div>
             ))}
@@ -244,7 +331,69 @@ function ExecutionTab({ clusterId }: { clusterId: number }) {
         </div>
       )}
 
+      {/* Queued — submitted but waiting on a runner slot */}
+      {queued.length > 0 && (
+        <div className="bg-eo-surface border border-eo-border rounded p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono">Queued ({queued.length})</h3>
+            <button
+              onClick={() => clearQueue.mutate()}
+              disabled={clearQueue.isPending}
+              className="px-3 py-1 border border-eo-border text-eo-stone rounded text-xs font-semibold hover:text-eo-cream hover:border-eo-muted disabled:opacity-50"
+            >Clear Queue</button>
+          </div>
+          <div className="space-y-1">
+            {queued.slice(0, 50).map((job) => (
+              <div key={job.id} className="flex items-center gap-3 text-xs font-mono text-eo-stone py-1">
+                {job.tier > 0 && <span className="text-eo-amber font-semibold">{TIER_LABELS[job.tier] ?? `T${job.tier}`}</span>}
+                <span className={cn("px-1.5 py-0.5 rounded text-[10px]", STATUS_STYLES["queued"])}>queued</span>
+                <span>{job.job_type}</span>
+                <JobDestination job={job} />
+                <span>{formatBytes(job.pri_store_bytes)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Running */}
+      {executing.length > 0 && (
+        <div className="bg-eo-surface border border-eo-terracotta/30 rounded p-4">
+          <h3 className="text-xs uppercase tracking-wider text-eo-terracotta font-mono mb-3">
+            Running ({executing.length}{cap !== undefined ? `/${cap}` : ""})
+          </h3>
+          <div className="space-y-2">
+            {executing.map((job) => (
+              <div key={job.id} className="flex flex-col gap-1">
+                <div className="flex items-center gap-3 text-xs font-mono">
+                  {job.tier > 0 && <span className="text-eo-amber font-semibold">{TIER_LABELS[job.tier] ?? `T${job.tier}`}</span>}
+                  <span className={cn("px-1.5 py-0.5 rounded text-[10px]", STATUS_STYLES["executing"])}>running</span>
+                  <span className="text-eo-terracotta">{job.job_type}</span>
+                  <JobDestination job={job} />
+                  <span className="text-eo-muted font-mono text-[10px] whitespace-nowrap">
+                    {job.progress || "running…"}
+                  </span>
+                </div>
+                {/* Indeterminate progress bar */}
+                <div className="h-1 w-full rounded-full bg-eo-border overflow-hidden">
+                  <div className="h-full w-1/3 rounded-full bg-eo-terracotta animate-indeterminate" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Recently completed */}
+      {(completed.length > 0 || failed.length > 0) && (
+        <div className="flex justify-end">
+          <button
+            onClick={() => clearHistory.mutate()}
+            disabled={clearHistory.isPending}
+            className="px-3 py-1 border border-eo-border text-eo-stone rounded text-xs font-semibold hover:text-eo-cream hover:border-eo-muted disabled:opacity-50"
+          >Clear History</button>
+        </div>
+      )}
       {completed.length > 0 && (
         <div>
           <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono mb-2">Recently Completed</h3>
@@ -262,7 +411,7 @@ function ExecutionTab({ clusterId }: { clusterId: number }) {
                 <tr key={job.id} className="border-b border-eo-border/30">
                   <td className="py-1 px-2"><span className="text-eo-sage">completed</span></td>
                   <td className="py-1 px-2">{job.job_type}</td>
-                  <td className="py-1 px-2 truncate max-w-[300px]">{job.index_name}</td>
+                  <td className="py-1 px-2 max-w-[300px]"><JobDestination job={job} /></td>
                   <td className="py-1 px-2 text-right">{formatBytes(job.pri_store_bytes)}</td>
                 </tr>
               ))}
@@ -288,6 +437,33 @@ function ExecutionTab({ clusterId }: { clusterId: number }) {
       )}
     </div>
   )
+}
+
+/** Renders the primary index/node label plus an arrow to the destination when present.
+ *  - reindex / promote_index: index_name → target_index
+ *  - relocate_shard:          from_node  → to_node
+ *  - everything else:         index_name or node_name
+ */
+function JobDestination({ job }: { job: Job }) {
+  if ((job.job_type === "reindex" || job.job_type === "promote_index") && job.target_index) {
+    return (
+      <span className="truncate flex-1">
+        {job.index_name}
+        <span className="text-eo-muted mx-1">→</span>
+        <span className="text-eo-amber">{job.target_index}</span>
+      </span>
+    )
+  }
+  if (job.job_type === "relocate_shard" && job.from_node && job.to_node) {
+    return (
+      <span className="truncate flex-1">
+        {job.from_node}
+        <span className="text-eo-muted mx-1">→</span>
+        <span className="text-eo-amber">{job.to_node}</span>
+      </span>
+    )
+  }
+  return <span className="truncate flex-1">{job.index_name || job.node_name || "—"}</span>
 }
 
 function SummaryCard({ label, value, color, pulse }: {

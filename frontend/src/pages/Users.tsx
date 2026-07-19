@@ -1,17 +1,29 @@
 import { useState } from "react"
 import { useAuth } from "@/context/AuthContext"
-import { useAdminUsers, useInviteUser, useDeleteUser, type UserDetail } from "@/api/auth"
+import {
+  useAdminUsers,
+  useInviteUser,
+  useDeleteUser,
+  useUpdateUserClusters,
+  useSetUserActive,
+  type UserDetail,
+} from "@/api/auth"
 import { useClusters } from "@/api/clusters"
+import { getErrorMessage } from "@/api/client"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 export default function Users() {
   const { isAdmin } = useAuth()
-  const { data: users } = useAdminUsers()
+  const { data: users, isError, error, refetch } = useAdminUsers()
   const { data: clusters } = useClusters()
   const [showInvite, setShowInvite] = useState(false)
 
   if (!isAdmin) {
     return <div className="flex items-center justify-center h-full text-eo-stone">Admin access required</div>
+  }
+  if (!users && isError) {
+    return <QueryError message={getErrorMessage(error)} onRetry={refetch} />
   }
 
   return (
@@ -33,6 +45,7 @@ export default function Users() {
             <th className="py-2 px-2">Name</th>
             <th className="py-2 px-2">Email</th>
             <th className="py-2 px-2">Role</th>
+            <th className="py-2 px-2">Status</th>
             <th className="py-2 px-2">Clusters</th>
             <th className="py-2 px-2">Created</th>
             <th className="py-2 px-2 text-right">Actions</th>
@@ -53,19 +66,28 @@ export default function Users() {
 }
 
 function UserRow({ user, clusters }: { user: UserDetail; clusters: { id: number; name: string }[] }) {
+  const { user: currentUser } = useAuth()
   const deleteUser = useDeleteUser()
+  const setActive = useSetUserActive()
+  const [showEditAccess, setShowEditAccess] = useState(false)
+  const isSelf = currentUser?.id === user.id
   const clusterNames = user.cluster_ids.map(
     (id) => clusters.find((c) => c.id === id)?.name ?? `#${id}`,
   )
 
   return (
-    <tr className="border-b border-eo-border/30 hover:bg-eo-surface/50">
+    <tr className={cn("border-b border-eo-border/30 hover:bg-eo-surface/50", !user.is_active && "opacity-60")}>
       <td className="py-2 px-2 text-eo-cream">{user.name}</td>
       <td className="py-2 px-2 text-eo-stone">{user.email}</td>
       <td className="py-2 px-2">
         <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-semibold",
           user.role === "admin" ? "bg-eo-amber/20 text-eo-amber" : "bg-eo-muted/20 text-eo-stone"
         )}>{user.role}</span>
+      </td>
+      <td className="py-2 px-2">
+        <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-semibold",
+          user.is_active ? "bg-eo-sage/20 text-eo-sage" : "bg-eo-brick/20 text-eo-brick"
+        )}>{user.is_active ? "active" : "inactive"}</span>
       </td>
       <td className="py-2 px-2">
         <div className="flex gap-1 flex-wrap">
@@ -82,16 +104,119 @@ function UserRow({ user, clusters }: { user: UserDetail; clusters: { id: number;
       </td>
       <td className="py-2 px-2 text-eo-muted">{new Date(user.created_at).toLocaleDateString()}</td>
       <td className="py-2 px-2 text-right">
-        {user.role !== "admin" && (
-          <button
-            onClick={() => deleteUser.mutate(user.id)}
-            className="text-eo-muted hover:text-eo-brick transition-colors"
-          >
-            <span className="material-symbols-outlined text-[16px]">delete</span>
-          </button>
-        )}
+        <div className="flex items-center justify-end gap-2">
+          {user.role !== "admin" && (
+            <button
+              onClick={() => setShowEditAccess(true)}
+              title="Edit cluster access"
+              className="text-eo-muted hover:text-eo-amber transition-colors"
+            >
+              <span className="material-symbols-outlined text-[16px]">tune</span>
+            </button>
+          )}
+          {!isSelf && (
+            <button
+              onClick={() => setActive.mutate({ userId: user.id, isActive: !user.is_active })}
+              disabled={setActive.isPending}
+              title={user.is_active ? "Deactivate user" : "Activate user"}
+              className={cn("transition-colors disabled:opacity-50",
+                user.is_active ? "text-eo-muted hover:text-eo-brick" : "text-eo-muted hover:text-eo-sage")}
+            >
+              <span className="material-symbols-outlined text-[16px]">
+                {user.is_active ? "toggle_on" : "toggle_off"}
+              </span>
+            </button>
+          )}
+          {user.role !== "admin" && (
+            <button
+              onClick={() => deleteUser.mutate(user.id)}
+              title="Delete user"
+              className="text-eo-muted hover:text-eo-brick transition-colors"
+            >
+              <span className="material-symbols-outlined text-[16px]">delete</span>
+            </button>
+          )}
+        </div>
       </td>
+      {showEditAccess && (
+        <EditAccessDialog user={user} clusters={clusters} onClose={() => setShowEditAccess(false)} />
+      )}
     </tr>
+  )
+}
+
+function EditAccessDialog({
+  user,
+  clusters,
+  onClose,
+}: {
+  user: UserDetail
+  clusters: { id: number; name: string }[]
+  onClose: () => void
+}) {
+  const [selectedClusters, setSelectedClusters] = useState<number[]>(user.cluster_ids)
+  const [error, setError] = useState("")
+  const updateClusters = useUpdateUserClusters()
+
+  const toggleCluster = (id: number) => {
+    setSelectedClusters((prev) =>
+      prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id],
+    )
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    setError("")
+    updateClusters.mutate(
+      { userId: user.id, clusterIds: selectedClusters },
+      {
+        onSuccess: () => onClose(),
+        onError: (err) => setError(err.message),
+      },
+    )
+  }
+
+  return (
+    <td colSpan={7} className="p-0">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+        <div className="bg-eo-surface border border-eo-border rounded-lg w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-eo-cream">Cluster Access — {user.name}</h2>
+            <button onClick={onClose} className="text-eo-muted hover:text-eo-cream">
+              <span className="material-symbols-outlined text-[20px]">close</span>
+            </button>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-eo-muted font-mono block mb-2">Cluster Access</label>
+              <div className="space-y-1">
+                {clusters.map((c) => (
+                  <label key={c.id} className="flex items-center gap-2 text-sm text-eo-stone cursor-pointer hover:text-eo-cream">
+                    <input type="checkbox" checked={selectedClusters.includes(c.id)}
+                      onChange={() => toggleCluster(c.id)}
+                      className="rounded border-eo-border bg-eo-bg text-eo-amber focus:ring-eo-amber" />
+                    {c.name}
+                  </label>
+                ))}
+                {clusters.length === 0 && <p className="text-xs text-eo-muted">No clusters configured yet</p>}
+              </div>
+            </div>
+
+            {error && <p className="text-xs text-eo-brick">{error}</p>}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" onClick={onClose}
+                className="px-4 py-2 text-sm text-eo-stone border border-eo-border rounded hover:text-eo-cream transition-colors">Cancel</button>
+              <button type="submit" disabled={updateClusters.isPending}
+                className="px-4 py-2 text-sm bg-eo-amber text-eo-bg rounded font-semibold hover:bg-eo-light-amber transition-colors disabled:opacity-50">
+                Save Access
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </td>
   )
 }
 

@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react"
 import { useClusterContext } from "@/context/ClusterContext"
 import { useClusterSettings, useUpdateSettings } from "@/api/es"
+import { getErrorMessage } from "@/api/client"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 interface SettingRow {
   key: string
@@ -41,9 +43,12 @@ const QUICK_ACTIONS = [
 
 export default function Settings() {
   const { activeCluster } = useClusterContext()
-  const { data: settings, isLoading } = useClusterSettings(activeCluster?.id ?? null)
+  const { data: settings, isLoading, isError, error, refetch } = useClusterSettings(activeCluster?.id ?? null)
   const updateSettings = useUpdateSettings(activeCluster?.id ?? null)
   const [filter, setFilter] = useState("")
+  const [newKey, setNewKey] = useState("")
+  const [newValue, setNewValue] = useState("")
+  const [newScope, setNewScope] = useState<"persistent" | "transient">("transient")
 
   const rows = useMemo<SettingRow[]>(() => {
     if (!settings) return []
@@ -95,17 +100,39 @@ export default function Settings() {
   if (!activeCluster) {
     return <div className="flex items-center justify-center h-full text-eo-stone">Select a cluster</div>
   }
+  if (!settings && isError) {
+    return <QueryError message={getErrorMessage(error)} onRetry={refetch} />
+  }
   if (isLoading) {
     return <div className="flex items-center justify-center h-full text-eo-stone">Loading settings...</div>
   }
 
   const modifiedCount = rows.filter((r) => r.isModified).length
+  const readOnly = !!activeCluster.read_only
 
   const handleReset = (key: string, scope: "persistent" | "transient") => {
+    if (readOnly) return
     updateSettings.mutate({ [scope]: { [key]: null } })
   }
 
+  const handleApplySetting = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (readOnly) return
+    const key = newKey.trim()
+    if (!key) return
+    updateSettings.mutate(
+      { [newScope]: { [key]: newValue } },
+      {
+        onSuccess: () => {
+          setNewKey("")
+          setNewValue("")
+        },
+      },
+    )
+  }
+
   const handleQuickAction = (action: (typeof QUICK_ACTIONS)[number]) => {
+    if (readOnly) return
     if (action.settings === null) {
       // Reset all transient
       if (!settings) return
@@ -125,7 +152,14 @@ export default function Settings() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-eo-cream">Cluster Settings</h2>
-          <p className="text-xs text-eo-stone font-mono mt-1">{modifiedCount} modified settings</p>
+          <p className="text-xs text-eo-stone font-mono mt-1">
+            {modifiedCount} modified settings
+            {readOnly && (
+              <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-eo-brick/20 text-eo-brick">
+                READ-ONLY — writes disabled
+              </span>
+            )}
+          </p>
         </div>
         <input
           type="text"
@@ -169,7 +203,8 @@ export default function Settings() {
                       <td className="py-1.5 px-3 text-right">
                         <button
                           onClick={() => handleReset(row.key, row.scope as "persistent" | "transient")}
-                          className="text-[10px] text-eo-stone hover:text-eo-cream border border-eo-border rounded px-2 py-0.5"
+                          disabled={readOnly}
+                          className="text-[10px] text-eo-stone hover:text-eo-cream border border-eo-border rounded px-2 py-0.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-eo-stone"
                         >Reset</button>
                       </td>
                     </tr>
@@ -207,14 +242,51 @@ export default function Settings() {
 
         {/* Quick Actions (1/3) */}
         <div className="space-y-3">
-          <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono">Quick Actions</h3>
+          {/* Set arbitrary setting */}
+          <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono">Set Setting</h3>
+          <form onSubmit={handleApplySetting} className="bg-eo-surface border border-eo-border rounded p-4 space-y-2">
+            <input
+              type="text"
+              placeholder="Setting key (e.g. cluster.routing.allocation.enable)"
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              disabled={readOnly}
+              className="w-full bg-eo-bg border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream placeholder:text-eo-muted focus:border-eo-amber focus:outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+            <input
+              type="text"
+              placeholder="Value (e.g. all)"
+              value={newValue}
+              onChange={(e) => setNewValue(e.target.value)}
+              disabled={readOnly}
+              className="w-full bg-eo-bg border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream placeholder:text-eo-muted focus:border-eo-amber focus:outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+            <div className="flex items-center gap-2">
+              <select
+                value={newScope}
+                onChange={(e) => setNewScope(e.target.value as "persistent" | "transient")}
+                disabled={readOnly}
+                className="flex-1 bg-eo-bg border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream focus:border-eo-amber focus:outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <option value="transient">Transient</option>
+                <option value="persistent">Persistent</option>
+              </select>
+              <button
+                type="submit"
+                disabled={readOnly || updateSettings.isPending || !newKey.trim()}
+                className="px-3 py-1.5 text-xs bg-eo-amber text-eo-bg rounded font-semibold hover:bg-eo-light-amber transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >Apply</button>
+            </div>
+          </form>
+
+          <h3 className="text-xs uppercase tracking-wider text-eo-muted font-mono pt-2">Quick Actions</h3>
           {QUICK_ACTIONS.map((action) => (
             <button
               key={action.label}
               onClick={() => handleQuickAction(action)}
-              disabled={updateSettings.isPending}
+              disabled={updateSettings.isPending || readOnly}
               className={cn(
-                "w-full text-left bg-eo-surface border rounded p-4 transition-colors group",
+                "w-full text-left bg-eo-surface border rounded p-4 transition-colors group disabled:opacity-40 disabled:cursor-not-allowed",
                 action.danger
                   ? "border-eo-brick/30 hover:border-eo-brick/60"
                   : "border-eo-border hover:border-eo-amber/40",

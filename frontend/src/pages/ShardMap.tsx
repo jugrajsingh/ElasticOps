@@ -1,8 +1,22 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef, useEffect } from "react"
+import { useVirtualizer } from "@tanstack/react-virtual"
 import { useClusterContext } from "@/context/ClusterContext"
-import { useShardMap, useClusterHealth, type NodeInfo, type ShardInfo, type IndexInfo } from "@/api/es"
-import { formatBytes, formatNumber, formatPercent, diskColor } from "@/lib/format"
+import {
+  useShardMap,
+  usePivot,
+  useClusterHealth,
+  useRebalanceSuggestions,
+  type ShardCell,
+  type ShardMapGrid,
+  type PivotTree,
+  type PivotNode,
+  type RebalanceSuggestion,
+} from "@/api/es"
+import { useRelocateShard, useJobs } from "@/api/jobs"
+import { getErrorMessage } from "@/api/client"
+import { formatBytes, formatPercent, diskColor } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import QueryError from "@/components/QueryError"
 
 type Mode = "grid" | "pivot"
 
@@ -17,10 +31,16 @@ type SelectedShard = {
   segments_count: number
 }
 
+const NODE_COL_WIDTH = 100
+const INDEX_COL_WIDTH = 280
+const GRID_ROW_HEIGHT = 28
+
 export default function ShardMap() {
   const { activeCluster } = useClusterContext()
-  const { data } = useShardMap(activeCluster?.id ?? null)
+  const { data: grid, isError: gridError, error: gridErrorObj, refetch: refetchGrid } = useShardMap(activeCluster?.id ?? null)
+  const { data: pivot, isError: pivotError, error: pivotErrorObj, refetch: refetchPivot } = usePivot(activeCluster?.id ?? null)
   const { data: health } = useClusterHealth(activeCluster?.id ?? null)
+  const { data: rebalanceData } = useRebalanceSuggestions(activeCluster?.id ?? null)
   const [mode, setMode] = useState<Mode>("grid")
   const [filter, setFilter] = useState("")
   const [nodeFilter, setNodeFilter] = useState<"all" | "hot" | "warm">("all")
@@ -29,12 +49,10 @@ export default function ShardMap() {
   if (!activeCluster) {
     return <div className="flex items-center justify-center h-full text-eo-stone">Select a cluster</div>
   }
-  if (!data) {
-    return <div className="flex items-center justify-center h-full text-eo-stone">Loading shard map...</div>
-  }
 
-  const dataNodes = data.nodes.filter((n) => n.role.includes("d")).sort((a, b) => a.name.localeCompare(b.name))
   const clusterStatus = health?.status?.toUpperCase() ?? "UNKNOWN"
+  const dataNodeNames = (grid?.data_nodes ?? []).map((n) => n.name)
+  const suggestions = rebalanceData?.suggestions ?? []
 
   return (
     <div className="flex flex-col h-full">
@@ -83,25 +101,49 @@ export default function ShardMap() {
       <div className="flex flex-1 min-h-0 relative">
         <div className={cn("flex-1 min-h-0", selectedShard && "mr-[400px]")}>
           {mode === "grid" ? (
-            <GridMode nodes={data.nodes} indices={data.indices} shards={data.shards} filter={filter} nodeFilter={nodeFilter} onSelectShard={setSelectedShard} />
+            grid ? (
+              <GridMode grid={grid} filter={filter} nodeFilter={nodeFilter} onSelectShard={setSelectedShard} />
+            ) : gridError ? (
+              <QueryError message={getErrorMessage(gridErrorObj)} onRetry={refetchGrid} />
+            ) : (
+              <SnapshotPending label="shard map" />
+            )
+          ) : pivot ? (
+            <PivotMode tree={pivot} filter={filter} />
+          ) : pivotError ? (
+            <QueryError message={getErrorMessage(pivotErrorObj)} onRetry={refetchPivot} />
           ) : (
-            <PivotMode nodes={data.nodes} indices={data.indices} shards={data.shards} filter={filter} />
+            <SnapshotPending label="pivot" />
           )}
         </div>
 
         {/* Shard detail panel */}
         {selectedShard && (
-          <ShardDetailPanel shard={selectedShard} dataNodes={dataNodes} onClose={() => setSelectedShard(null)} />
+          <ShardDetailPanel
+            shard={selectedShard}
+            dataNodeNames={dataNodeNames}
+            clusterId={activeCluster.id}
+            readOnly={activeCluster.read_only ?? false}
+            onClose={() => setSelectedShard(null)}
+          />
         )}
       </div>
+
+      {/* Rebalance suggestions — hidden when read-only or no suggestions */}
+      {!activeCluster.read_only && suggestions.length > 0 && (
+        <RebalanceSuggestionsPanel
+          suggestions={suggestions}
+          clusterId={activeCluster.id}
+        />
+      )}
 
       {/* Footer status bar */}
       <div className="h-8 flex items-center px-4 border-t border-eo-border bg-eo-surface/50 text-[10px] font-mono text-eo-muted gap-4">
         <span>{mode === "grid" ? "Grid Mode" : "Pivot Mode"}</span>
         <span>&middot;</span>
-        <span>{data.indices.length} indices</span>
+        <span>{(mode === "grid" ? grid?.indices.length : pivot?.roots.length) ?? 0} {mode === "grid" ? "indices" : "groups"}</span>
         <span>&middot;</span>
-        <span>{data.shards.length} shards</span>
+        <span>{(grid?.data_nodes.length ?? 0)} data nodes</span>
         <span>&middot;</span>
         <span>CLUSTER: {clusterStatus}</span>
       </div>
@@ -109,12 +151,118 @@ export default function ShardMap() {
   )
 }
 
+/** Thin non-blocking placeholder shown while a snapshot kind hasn't loaded yet. */
+function SnapshotPending({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-center h-full text-eo-muted text-xs font-mono">
+      Loading {label} snapshot…
+    </div>
+  )
+}
+
+/* ============ Rebalance Suggestions Panel ============ */
+
+function RebalanceSuggestionsPanel({ suggestions, clusterId }: {
+  suggestions: RebalanceSuggestion[]
+  clusterId: number
+}) {
+  const relocate = useRelocateShard(clusterId)
+  const [relocating, setRelocating] = useState<string | null>(null)
+
+  function handleRelocate(s: RebalanceSuggestion) {
+    const key = `${s.index}-${s.shard}-${s.from_node}`
+    setRelocating(key)
+    relocate.mutate(
+      { index: s.index, shard: s.shard, from_node: s.from_node, to_node: s.to_node },
+      { onSettled: () => setRelocating(null) },
+    )
+  }
+
+  return (
+    <div className="border-t border-eo-border bg-eo-surface/30 px-4 py-3">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[10px] font-mono text-eo-muted uppercase tracking-wider">
+          Rebalance Suggestions
+        </span>
+        <span className="text-[10px] font-mono text-eo-amber bg-eo-amber/10 px-1.5 py-0.5 rounded">
+          {suggestions.length}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {suggestions.map((s) => {
+          const key = `${s.index}-${s.shard}-${s.from_node}`
+          const isPending = relocating === key
+          return (
+            <div
+              key={key}
+              className="flex items-center gap-2 bg-eo-bg border border-eo-border rounded px-3 py-1.5 text-[11px] font-mono"
+            >
+              <span className="text-eo-cream truncate max-w-[200px]" title={s.index}>{s.index}</span>
+              <span className="text-eo-muted">[{s.shard}]</span>
+              <span className="text-eo-stone">{s.from_node}</span>
+              <span className="text-eo-muted">→</span>
+              <span className="text-eo-stone">{s.to_node}</span>
+              <span className="text-eo-muted">{formatBytes(s.size_bytes)}</span>
+              <button
+                onClick={() => handleRelocate(s)}
+                disabled={isPending || relocate.isPending}
+                className={cn(
+                  "ml-1 px-2 py-0.5 rounded text-[10px] border transition-colors",
+                  isPending || relocate.isPending
+                    ? "bg-eo-amber/10 text-eo-amber/40 border-eo-amber/20 cursor-not-allowed"
+                    : "bg-eo-amber/20 text-eo-amber border-eo-amber/40 hover:bg-eo-amber/30 cursor-pointer",
+                )}
+              >
+                {isPending ? "…" : "Relocate"}
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 /* ============ Shard Detail Panel ============ */
 
-function ShardDetailPanel({ shard, dataNodes, onClose }: {
-  shard: SelectedShard; dataNodes: NodeInfo[]; onClose: () => void
+function ShardDetailPanel({ shard, dataNodeNames, clusterId, readOnly, onClose }: {
+  shard: SelectedShard
+  dataNodeNames: string[]
+  clusterId: number
+  readOnly: boolean
+  onClose: () => void
 }) {
-  const otherNodes = dataNodes.filter((n) => n.name !== shard.node)
+  const otherNodes = dataNodeNames.filter((n) => n !== shard.node)
+  const [targetNode, setTargetNode] = useState("")
+  const [confirming, setConfirming] = useState(false)
+  const [relocatedJobId, setRelocatedJobId] = useState<number | null>(null)
+  const relocate = useRelocateShard(clusterId)
+  const { data: jobs } = useJobs(clusterId)
+
+  // Clear tracked job when the selected shard changes
+  useEffect(() => {
+    setRelocatedJobId(null)
+    setTargetNode("")
+    setConfirming(false)
+  }, [shard.index, shard.shard, shard.node])
+
+  const trackedJob = relocatedJobId !== null
+    ? (jobs ?? []).find((j) => j.id === relocatedJobId) ?? null
+    : null
+
+  function handleRelocate() {
+    if (!targetNode) return
+    relocate.mutate(
+      { index: shard.index, shard: shard.shard, from_node: shard.node, to_node: targetNode },
+      {
+        onSuccess: (data) => {
+          setRelocatedJobId(data.id)
+          setConfirming(false)
+          setTargetNode("")
+        },
+      },
+    )
+  }
 
   return (
     <div className="fixed top-0 right-0 h-full w-[400px] bg-eo-bg border-l border-eo-border z-30 flex flex-col shadow-2xl">
@@ -149,32 +297,111 @@ function ShardDetailPanel({ shard, dataNodes, onClose }: {
           <MetricRow label="State" value={shard.state} highlight={shard.state !== "STARTED"} />
           <MetricRow label="Node" value={shard.node} />
           <MetricRow label="Size" value={formatBytes(shard.store)} />
-          <MetricRow label="Docs" value={formatNumber(shard.docs)} />
+          <MetricRow label="Docs" value={String(shard.docs)} />
           <MetricRow label="Segments" value={String(shard.segments_count)} highlight={shard.segments_count > 10} />
         </div>
 
         {/* Actions */}
         <h3 className="text-xs font-mono text-eo-muted uppercase mt-6 mb-3">Actions</h3>
-        <div className="space-y-3">
-          <div>
-            <label className="text-[10px] font-mono text-eo-stone block mb-1">Relocate to...</label>
-            <select
-              className="w-full bg-eo-surface border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream focus:border-eo-amber focus:outline-none"
-              defaultValue=""
-            >
-              <option value="" disabled>Select target node</option>
-              {otherNodes.map((n) => (
-                <option key={n.name} value={n.name}>{n.name}</option>
-              ))}
-            </select>
+        {readOnly ? (
+          <p className="text-[10px] font-mono text-eo-muted">Cluster is read-only — relocation disabled.</p>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <label className="text-[10px] font-mono text-eo-stone block mb-1">Relocate to...</label>
+              <select
+                className="w-full bg-eo-surface border border-eo-border rounded px-2 py-1.5 text-xs font-mono text-eo-cream focus:border-eo-amber focus:outline-none"
+                value={targetNode}
+                onChange={(e) => { setTargetNode(e.target.value); setConfirming(false) }}
+                disabled={relocate.isPending}
+              >
+                <option value="" disabled>Select target node</option>
+                {otherNodes.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
+
+            {relocate.isError && (
+              <p className="text-[10px] font-mono text-eo-brick">
+                {relocate.error instanceof Error ? relocate.error.message : "Relocation failed."}
+              </p>
+            )}
+
+            {!confirming ? (
+              <button
+                className={cn(
+                  "w-full px-3 py-1.5 text-xs font-mono rounded border transition-colors",
+                  !targetNode || relocate.isPending
+                    ? "bg-eo-amber/10 text-eo-amber/40 border-eo-amber/20 cursor-not-allowed"
+                    : "bg-eo-amber/20 text-eo-amber border-eo-amber/40 hover:bg-eo-amber/30 cursor-pointer",
+                )}
+                disabled={!targetNode || relocate.isPending}
+                onClick={() => setConfirming(true)}
+              >
+                Relocate Shard
+              </button>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  className={cn(
+                    "flex-1 px-3 py-1.5 text-xs font-mono rounded border transition-colors",
+                    relocate.isPending
+                      ? "bg-eo-brick/10 text-eo-brick/40 border-eo-brick/20 cursor-not-allowed"
+                      : "bg-eo-brick/20 text-eo-brick border-eo-brick/40 hover:bg-eo-brick/30 cursor-pointer",
+                  )}
+                  disabled={relocate.isPending}
+                  onClick={handleRelocate}
+                >
+                  {relocate.isPending ? "Relocating…" : "Confirm relocate?"}
+                </button>
+                <button
+                  className="flex-1 px-3 py-1.5 text-xs font-mono rounded border bg-eo-surface text-eo-stone border-eo-border hover:text-eo-cream transition-colors"
+                  disabled={relocate.isPending}
+                  onClick={() => setConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {trackedJob && (
+              <div className={cn(
+                "mt-3 p-3 rounded border text-[10px] font-mono space-y-1",
+                trackedJob.status === "executing"
+                  ? "bg-eo-amber/10 border-eo-amber/30"
+                  : trackedJob.status === "completed"
+                    ? "bg-eo-sage/10 border-eo-sage/30"
+                    : "bg-eo-brick/10 border-eo-brick/30",
+              )}>
+                <div className="flex items-center justify-between">
+                  <span className="text-eo-muted uppercase">Job #{trackedJob.id}</span>
+                  <span className={cn(
+                    "px-1.5 py-0.5 rounded uppercase",
+                    trackedJob.status === "executing"
+                      ? "text-eo-amber"
+                      : trackedJob.status === "completed"
+                        ? "text-eo-sage"
+                        : "text-eo-brick",
+                  )}>
+                    {trackedJob.status}
+                  </span>
+                </div>
+                {trackedJob.status === "executing" && trackedJob.progress && (
+                  <div className="text-eo-cream">Relocating: {trackedJob.progress}</div>
+                )}
+                {trackedJob.status === "completed" && (
+                  <div className="text-eo-sage">Relocation completed.</div>
+                )}
+                {trackedJob.status === "failed" && (
+                  <div className="text-eo-brick">
+                    {trackedJob.error_message ?? "Relocation failed."}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          <button
-            className="w-full px-3 py-1.5 text-xs font-mono bg-eo-amber/20 text-eo-amber border border-eo-amber/40 rounded hover:bg-eo-amber/30 transition-colors cursor-not-allowed opacity-60"
-            disabled
-          >
-            Relocate Shard (coming soon)
-          </button>
-        </div>
+        )}
       </div>
     </div>
   )
@@ -193,86 +420,101 @@ function MetricRow({ label, value, highlight = false }: { label: string; value: 
 }
 
 /* ============ Grid Mode ============ */
+//
+// Columns (`data_nodes`) and rows (`indices`) come pre-filtered + pre-sorted from the precomputed
+// `shardmap` snapshot. Each cell reads `cells["<index> <node>"]` in O(1) — no client-side grouping.
+// Rows are virtualized with `useVirtualizer` so a ~5.9K-index × 32-node grid renders smoothly.
 
-function shortenNodeName(name: string): string {
-  const segments = name.split("-")
-  if (segments.length <= 2) return name
-  return segments.slice(-2).join("-")
-}
-
-function GridMode({ nodes, indices, shards, filter, nodeFilter, onSelectShard }: {
-  nodes: NodeInfo[]; indices: IndexInfo[]; shards: ShardInfo[]; filter: string
+function GridMode({ grid, filter, nodeFilter, onSelectShard }: {
+  grid: ShardMapGrid; filter: string
   nodeFilter: "all" | "hot" | "warm"
   onSelectShard: (shard: SelectedShard) => void
 }) {
-  const allDataNodes = nodes.filter((n) => n.role.includes("d")).sort((a, b) => a.name.localeCompare(b.name))
-  const dataNodes = allDataNodes.filter((n) => {
-    if (nodeFilter === "hot") return n.role.includes("h")
-    if (nodeFilter === "warm") return n.role.includes("w")
-    return true
-  })
-  const filteredIndices = indices
-    .filter((i) => !i.index.startsWith(".") && (!filter || i.index.toLowerCase().includes(filter.toLowerCase())))
-    .sort((a, b) => b.pri_store_size - a.pri_store_size)
+  const dataNodes = useMemo(
+    () =>
+      grid.data_nodes.filter((n) => {
+        if (nodeFilter === "hot") return n.tier === "hot"
+        if (nodeFilter === "warm") return n.tier === "warm"
+        return true
+      }),
+    [grid.data_nodes, nodeFilter],
+  )
 
-  // Build shard lookup: index -> node -> ShardInfo[]
-  const shardLookup = useMemo(() => {
-    const map = new Map<string, Map<string, ShardInfo[]>>()
-    for (const s of shards) {
-      if (!s.node) continue
-      if (!map.has(s.index)) map.set(s.index, new Map())
-      const nodeMap = map.get(s.index)!
-      if (!nodeMap.has(s.node)) nodeMap.set(s.node, [])
-      nodeMap.get(s.node)!.push(s)
-    }
-    return map
-  }, [shards])
+  const rows = useMemo(() => {
+    const f = filter.toLowerCase()
+    return f ? grid.indices.filter((i) => i.index.toLowerCase().includes(f)) : grid.indices
+  }, [grid.indices, filter])
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => GRID_ROW_HEIGHT,
+    overscan: 12,
+  })
+
+  const totalWidth = INDEX_COL_WIDTH + dataNodes.length * NODE_COL_WIDTH
 
   return (
-    <div className="flex-1 overflow-auto h-full">
-      <table className="text-[10px] font-mono" style={{ minWidth: `${280 + dataNodes.length * 100}px` }}>
-        <thead className="sticky top-0 z-10 bg-eo-bg">
-          <tr>
-            <th className="sticky left-0 z-20 bg-eo-bg border-r border-eo-border py-1 px-2 w-[280px]">
-              <div className="flex items-center justify-between">
-                <span className="text-eo-muted uppercase">Index</span>
-                <span className="text-eo-muted uppercase">Size</span>
+    <div ref={scrollRef} className="flex-1 overflow-auto h-full">
+      <div style={{ minWidth: `${totalWidth}px` }}>
+        {/* Sticky header row */}
+        <div className="sticky top-0 z-10 flex bg-eo-bg border-b border-eo-border text-[10px] font-mono">
+          <div
+            className="sticky left-0 z-20 bg-eo-bg border-r border-eo-border py-1 px-2 flex items-center justify-between shrink-0"
+            style={{ width: INDEX_COL_WIDTH }}
+          >
+            <span className="text-eo-muted uppercase">Index</span>
+            <span className="text-eo-muted uppercase">Size</span>
+          </div>
+          {dataNodes.map((node) => (
+            <div
+              key={node.name}
+              className="text-center py-1 px-1 border-r border-eo-border shrink-0"
+              style={{ width: NODE_COL_WIDTH }}
+            >
+              <div className="text-eo-stone truncate" title={node.name}>{node.short}</div>
+              <div className="h-1 bg-eo-border rounded-full mt-0.5 mx-1 overflow-hidden">
+                <div className={cn("h-full rounded-full", diskColor(node.disk_used_percent))} style={{ width: `${node.disk_used_percent}%` }} />
               </div>
-            </th>
-            {dataNodes.map((node) => (
-              <th key={node.name} className="text-center py-1 px-1 min-w-[100px] border-r border-eo-border">
-                <div className="text-eo-stone truncate" title={node.name}>{shortenNodeName(node.name)}</div>
-                <div className="h-1 bg-eo-border rounded-full mt-0.5 mx-1 overflow-hidden">
-                  <div className={cn("h-full rounded-full", diskColor(node.disk_used_percent))} style={{ width: `${node.disk_used_percent}%` }} />
-                </div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {filteredIndices.map((idx) => {
-            const nodeShards = shardLookup.get(idx.index)
+            </div>
+          ))}
+        </div>
+
+        {/* Virtualized body */}
+        <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
+          {rowVirtualizer.getVirtualItems().map((vRow) => {
+            const idx = rows[vRow.index]
             return (
-              <tr key={idx.index} className="group border-t border-eo-border/20 hover:bg-eo-surface/30">
-                <td className="sticky left-0 z-20 bg-eo-bg border-r border-eo-border group-hover:bg-eo-surface/30 py-1 px-2 w-[280px]">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-eo-cream truncate">{idx.index}</span>
-                    <span className="text-eo-stone shrink-0">{formatBytes(idx.pri_store_size)}</span>
-                  </div>
-                </td>
+              <div
+                key={idx.index}
+                className="group flex border-t border-eo-border/20 hover:bg-eo-surface/30 text-[10px] font-mono absolute left-0 w-full"
+                style={{ height: `${vRow.size}px`, transform: `translateY(${vRow.start}px)` }}
+              >
+                <div
+                  className="sticky left-0 z-10 bg-eo-bg border-r border-eo-border group-hover:bg-eo-surface/30 py-1 px-2 flex items-center justify-between gap-2 shrink-0"
+                  style={{ width: INDEX_COL_WIDTH }}
+                >
+                  <span className="text-eo-cream truncate">{idx.index}</span>
+                  <span className="text-eo-stone shrink-0">{formatBytes(idx.pri_store_size)}</span>
+                </div>
                 {dataNodes.map((node) => {
-                  const cellShards = nodeShards?.get(node.name) ?? []
+                  const cellShards = grid.cells[`${idx.index} ${node.name}`] ?? []
                   return (
-                    <td key={node.name} className="text-center py-1 px-1 border-r border-eo-border/30">
+                    <div
+                      key={node.name}
+                      className="text-center py-1 px-1 border-r border-eo-border/30 shrink-0"
+                      style={{ width: NODE_COL_WIDTH }}
+                    >
                       <div className="flex flex-wrap justify-center gap-[2px]">
-                        {cellShards.map((s, i) => (
+                        {cellShards.map((s: ShardCell, i: number) => (
                           <button
                             key={i}
                             onClick={() => onSelectShard({
-                              index: s.index,
+                              index: idx.index,
                               shard: s.shard,
                               prirep: s.prirep,
-                              node: s.node ?? "",
+                              node: node.name,
                               state: s.state,
                               store: s.store,
                               docs: s.docs,
@@ -282,313 +524,171 @@ function GridMode({ nodes, indices, shards, filter, nodeFilter, onSelectShard }:
                               "w-[10px] h-[10px] rounded-sm cursor-pointer hover:ring-1 hover:ring-eo-amber transition-shadow",
                               s.prirep === "p" ? "bg-eo-amber" : "border border-eo-cream/60",
                             )}
-                            title={`${s.index}[${s.shard}] ${s.prirep === "p" ? "primary" : "replica"} ${formatBytes(s.store)}`}
+                            title={`${idx.index}[${s.shard}] ${s.prirep === "p" ? "primary" : "replica"} ${formatBytes(s.store)}`}
                           />
                         ))}
                       </div>
-                    </td>
+                    </div>
                   )
                 })}
-              </tr>
+              </div>
             )
           })}
-        </tbody>
-      </table>
+        </div>
+      </div>
     </div>
   )
 }
 
 /* ============ Pivot Mode ============ */
+//
+// Consumes the precomputed dynamic-depth `pivot` snapshot tree directly. Each node already carries
+// its rollup (`total_size`, `shard_count`, `index_count`) and per-data-node aggregates (`per_node`),
+// so there is no client-side aggregation — only expand/collapse state, a text filter, and the
+// heatmap color formula remain. Rendered recursively: the hierarchy label and its heatmap row share
+// one flex row so the columns stay aligned with the sticky node header.
 
-interface TreeLevel1 {
-  subgroup: string        // e.g. "daas_products"
-  fullPrefix: string      // e.g. "crawl/daas_products"
-  indices: IndexInfo[]
-  totalSize: number
+function nodeMatchesFilter(node: PivotNode, f: string): boolean {
+  if (!f) return true
+  if (node.key.toLowerCase().includes(f)) return true
+  return node.children.some((c) => nodeMatchesFilter(c, f))
 }
 
-interface TreeLevel0 {
-  type: string            // e.g. "crawl"
-  children: TreeLevel1[]
-  totalSize: number
-  indexCount: number
-}
-
-function buildTree(indices: IndexInfo[], filter: string): TreeLevel0[] {
-  const level0Map = new Map<string, Map<string, IndexInfo[]>>()
-
-  for (const idx of indices) {
-    if (idx.index.startsWith(".")) continue
-    if (filter && !idx.index.toLowerCase().includes(filter.toLowerCase())) continue
-
-    const segments = idx.index.split("_")
-    const type = segments[0] || idx.index
-    // Use first 2 segments as subgroup key; if only 1 segment, use the full name
-    const subgroup = segments.length > 1 ? segments.slice(0, 2).join("_") : segments[0]
-
-    if (!level0Map.has(type)) level0Map.set(type, new Map())
-    const subMap = level0Map.get(type)!
-    if (!subMap.has(subgroup)) subMap.set(subgroup, [])
-    subMap.get(subgroup)!.push(idx)
-  }
-
-  const tree: TreeLevel0[] = []
-  for (const [type, subMap] of level0Map.entries()) {
-    const children: TreeLevel1[] = []
-    let totalSize = 0
-    let indexCount = 0
-
-    for (const [subgroup, subIndices] of subMap.entries()) {
-      const subSize = subIndices.reduce((sum, i) => sum + i.pri_store_size, 0)
-      children.push({
-        subgroup,
-        fullPrefix: `${type}/${subgroup}`,
-        indices: subIndices.sort((a, b) => a.index.localeCompare(b.index)),
-        totalSize: subSize,
-      })
-      totalSize += subSize
-      indexCount += subIndices.length
-    }
-
-    children.sort((a, b) => b.totalSize - a.totalSize)
-    tree.push({ type, children, totalSize, indexCount })
-  }
-
-  return tree.sort((a, b) => b.totalSize - a.totalSize)
-}
-
-function PivotMode({ nodes, indices, shards, filter }: {
-  nodes: NodeInfo[]; indices: IndexInfo[]; shards: ShardInfo[]; filter: string
-}) {
-  const dataNodes = nodes.filter((n) => n.role.includes("d")).sort((a, b) => a.name.localeCompare(b.name))
-
-  const tree = useMemo(() => buildTree(indices, filter), [indices, filter])
-
-  // Shard count per (index, node)
-  const shardCountByCell = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const s of shards) {
-      if (!s.node) continue
-      const key = `${s.index}:${s.node}`
-      map.set(key, (map.get(key) ?? 0) + 1)
-    }
-    return map
-  }, [shards])
-
-  // Size per (index, node)
-  const sizeByCell = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const s of shards) {
-      if (!s.node) continue
-      const key = `${s.index}:${s.node}`
-      map.set(key, (map.get(key) ?? 0) + s.store)
-    }
-    return map
-  }, [shards])
-
-  // expanded keys: "crawl" for level 0, "crawl/daas_products" for level 1
+function PivotMode({ tree, filter }: { tree: PivotTree; filter: string }) {
+  const f = filter.toLowerCase()
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const toggle = (key: string) => {
+  const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
       return next
     })
-  }
 
-  // Max cell size for heatmap scaling
-  const maxCellSize = useMemo(() => Math.max(...Array.from(sizeByCell.values()), 1), [sizeByCell])
+  const roots = useMemo(
+    () => (f ? tree.roots.filter((r) => nodeMatchesFilter(r, f)) : tree.roots),
+    [tree.roots, f],
+  )
 
-  // Compute aggregated size for a list of indices on a node
-  const aggregateSize = (idxList: IndexInfo[], nodeName: string) =>
-    idxList.reduce((sum, idx) => sum + (sizeByCell.get(`${idx.index}:${nodeName}`) ?? 0), 0)
-
-  // Build the visible rows for the right heatmap panel in the same order as the left panel
-  type HeatRow =
-    | { kind: "level0-agg"; key: string; allIndices: IndexInfo[] }
-    | { kind: "level1-agg"; key: string; indices: IndexInfo[] }
-    | { kind: "leaf"; key: string; idx: IndexInfo }
-
-  const heatRows = useMemo<HeatRow[]>(() => {
-    const rows: HeatRow[] = []
-    for (const l0 of tree) {
-      const l0Expanded = expanded.has(l0.type)
-      const allIndices = l0.children.flatMap((c) => c.indices)
-      if (!l0Expanded) {
-        rows.push({ kind: "level0-agg", key: l0.type, allIndices })
-      } else {
-        for (const l1 of l0.children) {
-          const l1Expanded = expanded.has(l1.fullPrefix)
-          if (!l1Expanded) {
-            rows.push({ kind: "level1-agg", key: l1.fullPrefix, indices: l1.indices })
-          } else {
-            for (const idx of l1.indices) {
-              rows.push({ kind: "leaf", key: idx.index, idx })
-            }
-          }
-        }
-      }
-    }
-    return rows
-  }, [tree, expanded])
+  const columns = tree.data_nodes
+  const totalWidth = 340 + columns.length * NODE_COL_WIDTH
 
   return (
-    <div className="flex flex-1 min-h-0">
-      {/* Left: hierarchy */}
-      <div className="w-[340px] flex-shrink-0 border-r border-eo-border overflow-y-auto sticky left-0 bg-eo-bg z-10">
-        {tree.map((l0) => {
-          const l0Expanded = expanded.has(l0.type)
-          return (
-            <div key={l0.type}>
-              {/* Level 0 row */}
-              <button
-                onClick={() => toggle(l0.type)}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs font-mono hover:bg-eo-surface/50 border-b border-eo-border/30"
-              >
-                <span className="material-symbols-outlined text-[14px] text-eo-muted">
-                  {l0Expanded ? "expand_more" : "chevron_right"}
-                </span>
-                <span className="truncate flex-1 text-left font-bold text-eo-amber">{l0.type}</span>
-                <span className="text-eo-stone text-[10px]">{l0.indexCount}</span>
-                <span className="text-eo-muted text-[10px]">{formatBytes(l0.totalSize)}</span>
-              </button>
-
-              {l0Expanded && l0.children.map((l1) => {
-                const l1Expanded = expanded.has(l1.fullPrefix)
-                return (
-                  <div key={l1.fullPrefix}>
-                    {/* Level 1 row */}
-                    <button
-                      onClick={() => toggle(l1.fullPrefix)}
-                      className="w-full flex items-center gap-2 pl-6 pr-3 py-1 text-[11px] font-mono hover:bg-eo-surface/40 border-b border-eo-border/20"
-                    >
-                      <span className="material-symbols-outlined text-[13px] text-eo-muted">
-                        {l1Expanded ? "expand_more" : "chevron_right"}
-                      </span>
-                      <span className="truncate flex-1 text-left text-eo-cream">{l1.subgroup}</span>
-                      <span className="text-eo-stone text-[10px]">{l1.indices.length}</span>
-                      <span className="text-eo-muted text-[10px]">{formatBytes(l1.totalSize)}</span>
-                    </button>
-
-                    {l1Expanded && l1.indices.map((idx) => (
-                      <div
-                        key={idx.index}
-                        className="flex items-center gap-2 pl-12 pr-3 py-0.5 text-[10px] font-mono text-eo-stone border-b border-eo-border/10 hover:bg-eo-surface/30"
-                      >
-                        <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", healthColor(idx.health))} />
-                        <span className="truncate flex-1">{idx.index}</span>
-                        <span className="text-eo-muted">{formatBytes(idx.pri_store_size)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })}
+    <div className="flex-1 overflow-auto h-full">
+      <div style={{ minWidth: `${totalWidth}px` }}>
+        {/* Sticky node-column header */}
+        <div className="sticky top-0 z-10 flex bg-eo-bg border-b border-eo-border text-[10px] font-mono">
+          <div className="sticky left-0 z-20 bg-eo-bg border-r border-eo-border shrink-0" style={{ width: 340 }} />
+          {columns.map((node) => (
+            <div key={node.name} className="text-center py-1 px-2 shrink-0" style={{ width: NODE_COL_WIDTH }}>
+              <div className="text-eo-stone truncate" title={node.name}>{node.short}</div>
+              <div className="text-[9px] text-eo-muted">{formatPercent(node.disk_used_percent)}</div>
+              <div className="h-1 bg-eo-border rounded-full mt-0.5 overflow-hidden">
+                <div className={cn("h-full rounded-full", diskColor(node.disk_used_percent))} style={{ width: `${node.disk_used_percent}%` }} />
+              </div>
             </div>
-          )
-        })}
-      </div>
+          ))}
+        </div>
 
-      {/* Right: node columns with heatmap */}
-      <div className="flex-1 overflow-auto">
-        <table className="text-[10px] font-mono" style={{ minWidth: `${dataNodes.length * 100}px` }}>
-          <thead className="sticky top-0 bg-eo-bg z-5">
-            <tr>
-              {dataNodes.map((node) => (
-                <th key={node.name} className="text-center py-1 px-2 min-w-[100px]">
-                  <div className="text-eo-stone truncate">{node.name.replace(/.*-/, "")}</div>
-                  <div className="text-[9px] text-eo-muted">{formatPercent(node.disk_used_percent)}</div>
-                  <div className="h-1 bg-eo-border rounded-full mt-0.5 overflow-hidden">
-                    <div className={cn("h-full rounded-full", diskColor(node.disk_used_percent))} style={{ width: `${node.disk_used_percent}%` }} />
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {heatRows.map((row) => {
-              if (row.kind === "level0-agg") {
-                return (
-                  <tr key={row.key} className="border-t border-eo-border/30">
-                    {dataNodes.map((node) => {
-                      const totalSize = aggregateSize(row.allIndices, node.name)
-                      const intensity = totalSize / maxCellSize
-                      return (
-                        <td key={node.name} className="text-center py-1 px-2">
-                          {totalSize > 0 && (
-                            <div
-                              className="rounded-sm mx-auto h-5 flex items-center justify-center text-[9px]"
-                              style={{ backgroundColor: `rgba(212, 165, 116, ${Math.max(0.1, intensity * 0.6)})` }}
-                            >
-                              <span className="text-eo-cream/80">{formatBytes(totalSize)}</span>
-                            </div>
-                          )}
-                        </td>
-                      )
-                    })}
-                  </tr>
-                )
-              }
-
-              if (row.kind === "level1-agg") {
-                return (
-                  <tr key={row.key} className="border-t border-eo-border/20">
-                    {dataNodes.map((node) => {
-                      const totalSize = aggregateSize(row.indices, node.name)
-                      const intensity = totalSize / maxCellSize
-                      return (
-                        <td key={node.name} className="text-center py-0.5 px-2">
-                          {totalSize > 0 && (
-                            <div
-                              className="rounded-sm mx-auto h-4 flex items-center justify-center text-[9px]"
-                              style={{ backgroundColor: `rgba(212, 165, 116, ${Math.max(0.08, intensity * 0.5)})` }}
-                            >
-                              <span className="text-eo-cream/75">{formatBytes(totalSize)}</span>
-                            </div>
-                          )}
-                        </td>
-                      )
-                    })}
-                  </tr>
-                )
-              }
-
-              // leaf
-              return (
-                <tr key={row.key} className="border-t border-eo-border/10">
-                  {dataNodes.map((node) => {
-                    const cellSize = sizeByCell.get(`${row.idx.index}:${node.name}`) ?? 0
-                    const cellCount = shardCountByCell.get(`${row.idx.index}:${node.name}`) ?? 0
-                    const intensity = cellSize / maxCellSize
-                    return (
-                      <td key={node.name} className="text-center py-0.5 px-2">
-                        {cellCount > 0 && (
-                          <div
-                            className="rounded-sm mx-auto h-4 flex items-center justify-center text-[9px]"
-                            style={{ backgroundColor: `rgba(212, 165, 116, ${Math.max(0.05, intensity * 0.5)})` }}
-                            title={`${row.idx.index} on ${node.name}: ${cellCount} shards, ${formatBytes(cellSize)}`}
-                          >
-                            <span className="text-eo-cream/70">{formatBytes(cellSize)}</span>
-                          </div>
-                        )}
-                      </td>
-                    )
-                  })}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        {/* Recursive tree body */}
+        <div>
+          {roots.map((root) => (
+            <PivotRow
+              key={root.key}
+              node={root}
+              columns={columns}
+              maxCellSize={tree.max_cell_size}
+              expanded={expanded}
+              toggle={toggle}
+              filter={f}
+            />
+          ))}
+        </div>
       </div>
     </div>
   )
 }
 
-function healthColor(status: string): string {
-  switch (status) {
-    case "green": return "bg-eo-sage"
-    case "yellow": return "bg-eo-terracotta"
-    case "red": return "bg-eo-brick"
-    default: return "bg-eo-muted"
-  }
+function PivotRow({ node, columns, maxCellSize, expanded, toggle, filter }: {
+  node: PivotNode
+  columns: PivotTree["data_nodes"]
+  maxCellSize: number
+  expanded: Set<string>
+  toggle: (key: string) => void
+  filter: string
+}) {
+  const isExpanded = expanded.has(node.key)
+  const hasChildren = node.children.length > 0
+  const perNode = useMemo(() => {
+    const map = new Map<string, { shard_count: number; size: number }>()
+    for (const agg of node.per_node) map.set(agg.node, agg)
+    return map
+  }, [node.per_node])
+
+  const visibleChildren = filter
+    ? node.children.filter((c) => nodeMatchesFilter(c, filter))
+    : node.children
+
+  return (
+    <>
+      <div className="flex border-t border-eo-border/20 hover:bg-eo-surface/20 text-[10px] font-mono">
+        {/* Hierarchy label (sticky left) */}
+        <button
+          onClick={() => hasChildren && toggle(node.key)}
+          className={cn(
+            "sticky left-0 z-10 bg-eo-bg flex items-center gap-2 py-1 pr-3 border-r border-eo-border text-left shrink-0",
+            hasChildren ? "hover:bg-eo-surface/50 cursor-pointer" : "cursor-default",
+          )}
+          style={{ width: 340, paddingLeft: `${8 + node.depth * 16}px` }}
+        >
+          {hasChildren ? (
+            <span className="material-symbols-outlined text-[14px] text-eo-muted">
+              {isExpanded ? "expand_more" : "chevron_right"}
+            </span>
+          ) : (
+            <span className="w-[14px] shrink-0" />
+          )}
+          <span className={cn("truncate flex-1", node.depth === 0 ? "font-bold text-eo-amber" : "text-eo-cream")}>
+            {node.label}
+          </span>
+          <span className="text-eo-stone text-[10px] shrink-0">{node.index_count}</span>
+          <span className="text-eo-muted text-[10px] shrink-0">{formatBytes(node.total_size)}</span>
+        </button>
+
+        {/* Per-node heatmap cells */}
+        {columns.map((col) => {
+          const agg = perNode.get(col.name)
+          const size = agg?.size ?? 0
+          const intensity = maxCellSize > 0 ? size / maxCellSize : 0
+          return (
+            <div key={col.name} className="text-center py-0.5 px-2 shrink-0" style={{ width: NODE_COL_WIDTH }}>
+              {size > 0 && (
+                <div
+                  className="rounded-sm mx-auto h-4 flex items-center justify-center text-[9px]"
+                  style={{ backgroundColor: `rgba(212, 165, 116, ${Math.max(0.08, intensity * 0.6)})` }}
+                  title={`${node.key} on ${col.name}: ${agg?.shard_count ?? 0} shards, ${formatBytes(size)}`}
+                >
+                  <span className="text-eo-cream/80">{formatBytes(size)}</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Children */}
+      {isExpanded &&
+        visibleChildren.map((child) => (
+          <PivotRow
+            key={child.key}
+            node={child}
+            columns={columns}
+            maxCellSize={maxCellSize}
+            expanded={expanded}
+            toggle={toggle}
+            filter={filter}
+          />
+        ))}
+    </>
+  )
 }
