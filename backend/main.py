@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -105,6 +105,13 @@ if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
     @app.get("/{rest_of_path:path}")
-    async def spa_fallback(rest_of_path: str) -> FileResponse:  # noqa: ARG001
-        """Serve index.html for all non-API routes (SPA client-side routing)."""
+    async def spa_fallback(rest_of_path: str) -> FileResponse:
+        """Serve index.html for all non-API routes (SPA client-side routing).
+
+        Unknown ``/api/*`` paths must 404 as JSON rather than silently falling through to
+        index.html, which would mask a real 404 (typo'd endpoint, removed route) as a 200 HTML
+        response. ``rest_of_path`` has no leading slash here, so ``startswith("api/")`` is correct.
+        """
+        if rest_of_path.startswith("api/"):
+            raise HTTPException(404, "Not found")
         return FileResponse(STATIC_DIR / "index.html")

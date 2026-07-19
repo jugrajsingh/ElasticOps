@@ -91,6 +91,7 @@ async def test_should_return_me_with_valid_token(client: AsyncClient, admin_head
 async def test_should_reject_unauthenticated_cluster_list(client: AsyncClient):
     response = await client.get("/api/clusters")
     assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
 
 
 async def test_should_reject_malformed_token(client: AsyncClient):
@@ -99,6 +100,7 @@ async def test_should_reject_malformed_token(client: AsyncClient):
         headers={"Authorization": "Bearer not-a-valid-jwt"},
     )
     assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
 
 
 async def test_should_reject_expired_token(client: AsyncClient):

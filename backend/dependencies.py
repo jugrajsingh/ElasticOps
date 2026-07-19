@@ -8,6 +8,8 @@ from backend.services.es_client import ESClient
 from backend.services.job_runner import JobRunner
 from backend.services.secrets import decrypt
 
+INACTIVE_CLUSTER_DETAIL = "Cluster is inactive; reactivate it to perform ES operations"
+
 
 def get_job_runner(request: Request) -> JobRunner:
     """Return the app-wide :class:`JobRunner` set on app state during the lifespan."""
@@ -30,7 +32,7 @@ async def require_writable_cluster(cluster_id: int, db: AsyncSession) -> Cluster
     if cluster is None:
         raise HTTPException(404, "Cluster not found")
     if not cluster.is_active:
-        raise HTTPException(409, "Cluster is inactive; reactivate it to perform ES operations")
+        raise HTTPException(409, INACTIVE_CLUSTER_DETAIL)
     if cluster.read_only:
         raise HTTPException(403, "cluster is read-only")
     return cluster
@@ -65,6 +67,6 @@ async def get_es_client(cluster_id: int, db: AsyncSession = Depends(get_db)) -> 
     if not cluster:
         raise HTTPException(404, "Cluster not found")
     if not cluster.is_active:
-        raise HTTPException(409, "Cluster is inactive; reactivate it to perform ES operations")
+        raise HTTPException(409, INACTIVE_CLUSTER_DETAIL)
 
     return build_es_client(cluster)

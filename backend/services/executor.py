@@ -126,9 +126,17 @@ async def _run_forcemerge_task(
     action = "expunge deletes" if only_expunge_deletes else "force merge"
     resp = await es.forcemerge_async(job.index_name, only_expunge_deletes=only_expunge_deletes)
     task_id = resp.get("task")
+    if task_id is None:
+        raise RuntimeError(f"{action} of '{job.index_name}' did not return a task id")  # noqa: TRY003
     job.task_id = task_id
     for _ in range(attempts):
-        status = await es.get_task(task_id)
+        status = None
+        with contextlib.suppress(Exception):
+            status = await es.get_task(task_id)
+        if status is None:
+            if delay:
+                await asyncio.sleep(delay)
+            continue
         if on_progress:
             await on_progress(f"{action}: '{job.index_name}'...")
         if status.get("completed"):
@@ -501,9 +509,17 @@ async def execute_reindex(
     """
     resp = await es.reindex_async(job.index_name, job.target_index)
     task_id = resp.get("task")
+    if task_id is None:
+        raise RuntimeError(f"Reindex '{job.index_name}' did not return a task id")  # noqa: TRY003
     job.task_id = task_id
     for _ in range(attempts):
-        status = await es.get_task(task_id)
+        status = None
+        with contextlib.suppress(Exception):
+            status = await es.get_task(task_id)
+        if status is None:
+            if delay:
+                await asyncio.sleep(delay)
+            continue
         if on_progress:
             await on_progress("reindexing...")
         if status.get("completed"):

@@ -14,19 +14,33 @@ class FakeES:
     failure (top-level ``error`` or per-shard ``response._shards`` failures).
     """
 
-    def __init__(self, *, completes_after: int = 2, task_result: dict | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        completes_after: int = 2,
+        task_result: dict | None = None,
+        raise_get_task_times: int = 0,
+        no_task_id: bool = False,
+    ) -> None:
         self.submitted_index: str | None = None
         self.only_expunge_deletes: bool | None = None
         self.poll_count = 0
         self._after = completes_after
         self._result = task_result or {}
+        self._raise_times = raise_get_task_times
+        self._no_task_id = no_task_id
 
     async def forcemerge_async(self, index: str, *, only_expunge_deletes: bool = False) -> dict:
         self.submitted_index = index
         self.only_expunge_deletes = only_expunge_deletes
+        if self._no_task_id:
+            return {}
         return {"task": "node:7"}
 
     async def get_task(self, task_id: str) -> dict:  # noqa: ARG002
+        if self._raise_times > 0:
+            self._raise_times -= 1
+            raise ConnectionError("transient ES failure")  # noqa: TRY003
         self.poll_count += 1
         if self.poll_count >= self._after:
             return {"completed": True, **self._result}
@@ -83,3 +97,21 @@ async def test_should_raise_timeout_when_forcemerge_never_completes():
     job = SimpleNamespace(index_name="idx", task_id=None, detail="")
     with pytest.raises(TimeoutError):
         await execute_force_merge(es, job, attempts=3, delay=0)
+
+
+@pytest.mark.asyncio
+async def test_should_complete_forcemerge_after_transient_get_task_failure():
+    # get_task raises once (transient network blip), then succeeds; the job must still complete.
+    es = FakeES(completes_after=2, raise_get_task_times=1)
+    job = SimpleNamespace(index_name="idx", task_id=None, detail="")
+    await execute_force_merge(es, job, delay=0)
+    assert job.task_id == "node:7"
+    assert "idx" in job.detail
+
+
+@pytest.mark.asyncio
+async def test_should_raise_when_forcemerge_submit_returns_no_task_id():
+    es = FakeES(no_task_id=True)
+    job = SimpleNamespace(index_name="idx", task_id=None, detail="")
+    with pytest.raises(RuntimeError):
+        await execute_force_merge(es, job, delay=0)

@@ -37,7 +37,7 @@ async def get_current_user(
 ) -> User:
     """Returns the authenticated User object. Auth is always required."""
     if not credentials:
-        raise HTTPException(401, "Missing authorization token")
+        raise HTTPException(401, "Missing authorization token", headers={"WWW-Authenticate": "Bearer"})
 
     settings = get_settings()
     try:
@@ -47,16 +47,16 @@ async def get_current_user(
             algorithms=[settings.auth.jwt_algorithm],
         )
     except jwt.InvalidTokenError as err:
-        raise HTTPException(401, "Invalid token") from err
+        raise HTTPException(401, "Invalid token", headers={"WWW-Authenticate": "Bearer"}) from err
 
     email: str | None = payload.get("sub")
     if not email:
-        raise HTTPException(401, "Token missing subject claim")
+        raise HTTPException(401, "Token missing subject claim", headers={"WWW-Authenticate": "Bearer"})
 
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
-        raise HTTPException(401, "User not found or deactivated")
+        raise HTTPException(401, "User not found or deactivated", headers={"WWW-Authenticate": "Bearer"})
 
     return user
 
