@@ -125,7 +125,8 @@ class ESClient:
             params={
                 "format": "json",
                 "bytes": "b",
-                "h": "index,shard,prirep,state,docs,store,node,segments.count",
+                "h": "index,shard,prirep,state,docs,store,node,segments.count,"
+                "unassigned.reason,unassigned.at,unassigned.for,unassigned.details",
             },
         )
 
@@ -154,6 +155,27 @@ class ESClient:
 
     async def reroute(self, commands: list[dict]) -> dict:
         return await self.request("POST", "/_cluster/reroute", json={"commands": commands})
+
+    async def reroute_retry_failed(self) -> dict:
+        """Retry shards that ES gave up allocating after too many failed attempts (empty body)."""
+        return await self.request("POST", "/_cluster/reroute", params={"retry_failed": "true"})
+
+    async def allocation_explain(
+        self, index: str | None = None, shard: int | None = None, primary: bool | None = None
+    ) -> dict:
+        """Explain why a shard is (or isn't) allocated where it is.
+
+        With no arguments, ES explains the first unassigned shard it finds (empty body). When
+        ``index`` is given, ``shard``/``primary`` are included alongside it when provided.
+        """
+        body: dict = {}
+        if index is not None:
+            body["index"] = index
+            if shard is not None:
+                body["shard"] = shard
+            if primary is not None:
+                body["primary"] = primary
+        return await self.request("POST", "/_cluster/allocation/explain", json=body)
 
     async def get_task(self, task_id: str) -> dict:
         return await self.request("GET", f"/_tasks/{task_id}")

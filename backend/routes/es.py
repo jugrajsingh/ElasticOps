@@ -56,6 +56,13 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
+def _safe_str(val) -> str | None:
+    """``None`` for absent/empty ES cat values (e.g. ``unassigned.reason`` on an assigned shard)."""
+    if val is None or val == "":
+        return None
+    return str(val)
+
+
 def _parse_node(raw: dict) -> NodeInfo:
     role = raw.get("node.role", "")
     if not role or role == "-":
@@ -101,6 +108,10 @@ def _parse_shard(raw: dict) -> ShardInfo:
         store=_safe_int(raw.get("store")),
         node=raw.get("node"),
         segments_count=_safe_int(raw.get("segments.count")),
+        unassigned_reason=_safe_str(raw.get("unassigned.reason")),
+        unassigned_at=_safe_str(raw.get("unassigned.at")),
+        unassigned_for=_safe_str(raw.get("unassigned.for")),
+        unassigned_details=_safe_str(raw.get("unassigned.details")),
     )
 
 
@@ -234,6 +245,14 @@ async def _live_shards(es: ESClient) -> list[dict]:
     return snapshot_service.build_shards(shards)
 
 
+async def _live_unassigned(es: ESClient) -> list[dict]:
+    from backend.services import snapshot_service
+
+    raw_shards = await es.cat_shards_detailed()
+    shards = [_parse_shard(s).model_dump() for s in raw_shards]
+    return snapshot_service.build_unassigned(shards)
+
+
 async def _live_shardmap(es: ESClient) -> dict:
     from backend.services import snapshot_service
 
@@ -298,6 +317,18 @@ async def list_shards(
     es: ESClient = Depends(get_es_client),
 ):
     return await _serve(db, cluster_id, "shards", lambda: _live_shards(es))
+
+
+@router.get("/unassigned", response_model=CachedResponse[list[dict]])
+async def unassigned_shards(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    """Unassigned-shard triage list, snapshot-first like every other read here. See
+    :func:`backend.services.snapshot_service.build_unassigned` for the row shape.
+    """
+    return await _serve(db, cluster_id, "unassigned", lambda: _live_unassigned(es))
 
 
 @router.get("/overview", response_model=CachedResponse[OverviewResponse])
@@ -421,6 +452,39 @@ async def update_settings(
     if body.transient is not None:
         payload["transient"] = body.transient
     return await es.put_cluster_settings(payload)
+
+
+class AllocationExplainRequest(BaseModel):
+    index: str | None = None
+    shard: int | None = None
+    primary: bool | None = None
+
+
+@router.post("/allocation/explain")
+async def allocation_explain(
+    cluster_id: int,  # noqa: ARG001 — required path param for router prefix resolution
+    body: AllocationExplainRequest,
+    es: ESClient = Depends(get_es_client),
+):
+    """Explain why a shard is (or isn't) allocated where it is. Live, never cached: the whole point
+    is diagnosing the CURRENT allocation decision. Read-only against ES (explain mutates nothing),
+    so no writable-cluster gate — it must keep working on a read-only cluster to diagnose the very
+    problem that gate exists for.
+    """
+    return await es.allocation_explain(body.index, body.shard, body.primary)
+
+
+@router.post("/reroute/retry-failed")
+async def reroute_retry_failed(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    es: ESClient = Depends(get_es_client),
+):
+    """Retry shards ES gave up allocating after too many failed attempts. This IS a cluster write
+    (``_cluster/reroute``), so it goes through the same gate as ``PUT /es/settings``.
+    """
+    await require_writable_cluster(cluster_id, db)
+    return await es.reroute_retry_failed()
 
 
 class RestRequest(BaseModel):

@@ -149,6 +149,35 @@ def build_shardmap(nodes: list[dict], indices: list[dict], shards: list[dict]) -
     return {"data_nodes": data_nodes, "indices": grid_indices, "cells": cells}
 
 
+def build_unassigned(shards: list[dict]) -> list[dict]:
+    """Unassigned-shard triage list: index/shard/prirep/state plus the ``unassigned.*`` reason fields.
+
+    A shard counts as unassigned when its state isn't ``STARTED`` or it has no owning node (covers
+    both a plain ``UNASSIGNED`` state and the rarer case of a started-but-nodeless row). Deliberately
+    excluded from the shard-map grid cells (``build_shardmap`` keeps its existing skip); this list is
+    the only place unassigned shards surface, for the dedicated triage panel.
+    """
+    result = []
+    for shard in shards:
+        state = shard.get("state", "")
+        node = shard.get("node")
+        if state == "STARTED" and node:
+            continue
+        result.append(
+            {
+                "index": shard.get("index", ""),
+                "shard": shard.get("shard", 0),
+                "prirep": shard.get("prirep", ""),
+                "state": state,
+                "reason": shard.get("unassigned_reason"),
+                "at": shard.get("unassigned_at"),
+                "for": shard.get("unassigned_for"),
+                "details": shard.get("unassigned_details"),
+            }
+        )
+    return result
+
+
 def build_pivot(
     indices: list[dict],
     shards: list[dict],
@@ -309,6 +338,7 @@ async def refresh_cluster(es, cluster_id: int, db, sep: str = "_") -> dict[str, 
         ("shardmap", lambda: build_shardmap(nodes, indices, shards), len(shards)),
         ("pivot", lambda: build_pivot(indices, shards, nodes, sep=sep), len(shards)),
         ("shards", lambda: build_shards(shards), len(shards)),
+        ("unassigned", lambda: build_unassigned(shards), len(shards)),
     ]
 
     item_counts: dict[str, int] = {}

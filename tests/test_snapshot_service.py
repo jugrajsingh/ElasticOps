@@ -13,6 +13,7 @@ from backend.services.snapshot_service import (
     build_pivot,
     build_shardmap,
     build_shards,
+    build_unassigned,
     normalize_shard_node,
     refresh_cluster,
 )
@@ -65,16 +66,31 @@ def _index(name: str, pri: int = 1, pri_store: int = 5 * GB) -> dict:
     }
 
 
-def _shard(index: str, node: str | None, shard: int = 0, store: int = 5 * GB, prirep: str = "p") -> dict:
+def _shard(
+    index: str,
+    node: str | None,
+    shard: int = 0,
+    store: int = 5 * GB,
+    prirep: str = "p",
+    state: str = "STARTED",
+    unassigned_reason: str | None = None,
+    unassigned_at: str | None = None,
+    unassigned_for: str | None = None,
+    unassigned_details: str | None = None,
+) -> dict:
     return {
         "index": index,
         "shard": shard,
         "prirep": prirep,
-        "state": "STARTED",
+        "state": state,
         "docs": 1000,
         "store": store,
         "node": node,
         "segments_count": 1,
+        "unassigned_reason": unassigned_reason,
+        "unassigned_at": unassigned_at,
+        "unassigned_for": unassigned_for,
+        "unassigned_details": unassigned_details,
     }
 
 
@@ -318,6 +334,49 @@ class TestBuildShards:
         assert result[0]["node"] == "src"
 
 
+class TestBuildUnassigned:
+    def test_should_exclude_started_shards_with_a_node(self):
+        shards = [_shard("idx", "prefix-data-hot-0")]
+        assert build_unassigned(shards) == []
+
+    def test_should_include_shard_with_no_node(self):
+        shards = [_shard("idx", None, state="UNASSIGNED")]
+        result = build_unassigned(shards)
+        assert len(result) == 1
+        assert result[0]["index"] == "idx"
+        assert result[0]["state"] == "UNASSIGNED"
+
+    def test_should_include_shard_whose_state_is_not_started_even_with_a_node(self):
+        shards = [_shard("idx", "prefix-data-hot-0", state="INITIALIZING")]
+        result = build_unassigned(shards)
+        assert len(result) == 1
+        assert result[0]["state"] == "INITIALIZING"
+
+    def test_should_flow_through_reason_fields(self):
+        shards = [
+            _shard(
+                "idx",
+                None,
+                state="UNASSIGNED",
+                unassigned_reason="ALLOCATION_FAILED",
+                unassigned_at="2026-08-01T10:00:00.000Z",
+                unassigned_for="5m",
+                unassigned_details="failed to allocate 3 times",
+            )
+        ]
+        result = build_unassigned(shards)
+        assert result[0]["reason"] == "ALLOCATION_FAILED"
+        assert result[0]["at"] == "2026-08-01T10:00:00.000Z"
+        assert result[0]["for"] == "5m"
+        assert result[0]["details"] == "failed to allocate 3 times"
+
+    def test_should_carry_shard_and_prirep(self):
+        shards = [_shard("idx", None, shard=2, prirep="r", state="UNASSIGNED")]
+        result = build_unassigned(shards)
+        assert result[0]["shard"] == 2
+        assert result[0]["prirep"] == "r"
+
+
 @pytest.fixture
 async def db_session():
     engine = create_async_engine("sqlite+aiosqlite://", echo=False)
@@ -371,7 +430,7 @@ class TestRefreshCluster:
 
         counts = await refresh_cluster(es, cluster.id, db_session, sep="_")
 
-        expected_kinds = {"health", "overview", "nodes", "indices", "shardmap", "pivot", "shards"}
+        expected_kinds = {"health", "overview", "nodes", "indices", "shardmap", "pivot", "shards", "unassigned"}
         assert set(counts) == expected_kinds
         for kind in expected_kinds:
             snap = await snapshot_repo.get_latest(db_session, cluster.id, kind)
@@ -423,4 +482,4 @@ class TestRefreshCluster:
         total = await db_session.scalar(
             select(func.count()).select_from(ClusterSnapshot).where(ClusterSnapshot.cluster_id == cluster.id)
         )
-        assert total == 7  # 7 kinds
+        assert total == 8  # 8 kinds

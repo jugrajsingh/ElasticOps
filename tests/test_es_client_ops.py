@@ -96,3 +96,67 @@ async def test_cat_shards_on_node_returns_empty_for_unknown_node(monkeypatch):
     es = ESClient(base_url="http://es.example.com", username="", password="")
     result = await es.cat_shards_on_node("ghost-node")
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_cat_shards_detailed_requests_unassigned_columns(monkeypatch):
+    calls = {}
+
+    async def fake_request(_self, method, path, **kw):
+        calls.update(method=method, path=path, params=kw.get("params"))
+        return []
+
+    monkeypatch.setattr(ESClient, "request", fake_request)
+    es = ESClient(base_url="http://es.example.com", username="", password="")
+    await es.cat_shards_detailed()
+    h = calls["params"]["h"]
+    for column in ("unassigned.reason", "unassigned.at", "unassigned.for", "unassigned.details"):
+        assert column in h, f"{column!r} missing from cat_shards_detailed h= columns: {h!r}"
+
+
+@pytest.mark.asyncio
+async def test_allocation_explain_sends_body_when_index_given(monkeypatch):
+    calls = {}
+
+    async def fake_request(_self, method, path, **kw):
+        calls.update(method=method, path=path, json=kw.get("json"))
+        return {"index": "idx", "shard": 0, "primary": True}
+
+    monkeypatch.setattr(ESClient, "request", fake_request)
+    es = ESClient(base_url="http://es.example.com", username="", password="")
+    out = await es.allocation_explain(index="idx", shard=0, primary=True)
+    assert calls["method"] == "POST"
+    assert calls["path"] == "/_cluster/allocation/explain"
+    assert calls["json"] == {"index": "idx", "shard": 0, "primary": True}
+    assert out["index"] == "idx"
+
+
+@pytest.mark.asyncio
+async def test_allocation_explain_sends_empty_body_when_no_args(monkeypatch):
+    calls = {}
+
+    async def fake_request(_self, method, path, **kw):
+        calls.update(method=method, path=path, json=kw.get("json"))
+        return {"index": "auto-discovered"}
+
+    monkeypatch.setattr(ESClient, "request", fake_request)
+    es = ESClient(base_url="http://es.example.com", username="", password="")
+    await es.allocation_explain()
+    assert calls["json"] == {}
+
+
+@pytest.mark.asyncio
+async def test_reroute_retry_failed_posts_with_retry_param(monkeypatch):
+    calls = {}
+
+    async def fake_request(_self, method, path, **kw):
+        calls.update(method=method, path=path, params=kw.get("params"))
+        return {"acknowledged": True}
+
+    monkeypatch.setattr(ESClient, "request", fake_request)
+    es = ESClient(base_url="http://es.example.com", username="", password="")
+    out = await es.reroute_retry_failed()
+    assert calls["method"] == "POST"
+    assert calls["path"] == "/_cluster/reroute"
+    assert calls["params"] == {"retry_failed": "true"}
+    assert out["acknowledged"] is True

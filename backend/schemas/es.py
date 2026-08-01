@@ -52,6 +52,10 @@ class ShardInfo(BaseModel):
     store: int
     node: str | None
     segments_count: int
+    unassigned_reason: str | None = None
+    unassigned_at: str | None = None
+    unassigned_for: str | None = None
+    unassigned_details: str | None = None
 
 
 class RecoveryInfo(BaseModel):

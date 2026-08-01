@@ -108,6 +108,31 @@ def _full_mock_es() -> AsyncMock:
     return mock
 
 
+def _full_mock_es_with_unassigned() -> AsyncMock:
+    """A mock ES whose shard list includes one UNASSIGNED shard with reason fields, for live-fallback
+    unassigned-list coverage (mirrors ``_full_mock_es`` but adds the unassigned-shard fixture).
+    """
+    mock = _full_mock_es()
+    mock.cat_shards_detailed.return_value = [
+        *mock.cat_shards_detailed.return_value,
+        {
+            "index": "logs_app_1_2024",
+            "shard": "1",
+            "prirep": "r",
+            "state": "UNASSIGNED",
+            "docs": "0",
+            "store": "0",
+            "node": None,
+            "segments.count": "0",
+            "unassigned.reason": "NODE_LEFT",
+            "unassigned.at": "2026-08-01T10:00:00.000Z",
+            "unassigned.for": "",
+            "unassigned.details": "node departed the cluster",
+        },
+    ]
+    return mock
+
+
 # --- Snapshot-first: served from DB, ES never touched -------------------------------------------
 
 
@@ -160,6 +185,22 @@ def _full_mock_es() -> AsyncMock:
                 "indices": [{"index": "logs_app_1_2024", "pri_store_size": 5, "health": "green"}],
                 "cells": {"logs_app_1_2024 data-hot-1": []},
             },
+        ),
+        (
+            "unassigned",
+            "unassigned",
+            [
+                {
+                    "index": "logs_app_1_2024",
+                    "shard": 0,
+                    "prirep": "r",
+                    "state": "UNASSIGNED",
+                    "reason": "NODE_LEFT",
+                    "at": "2026-08-01T10:00:00.000Z",
+                    "for": None,
+                    "details": "node departed the cluster",
+                }
+            ],
         ),
     ],
 )
@@ -270,6 +311,28 @@ async def test_should_live_fallback_when_no_snapshot(authed_client: AsyncClient)
     assert snap.payload[0]["name"] == "data-hot-1"
 
 
+async def test_should_live_fallback_unassigned_shards_with_reason_fields(authed_client: AsyncClient):
+    cluster_id = await _create_cluster(authed_client)
+
+    app.dependency_overrides[get_es_client] = _full_mock_es_with_unassigned
+    try:
+        resp = await authed_client.get(f"/api/clusters/{cluster_id}/es/unassigned")
+        assert resp.status_code == 200
+        wrapper = resp.json()
+        assert wrapper["stale_seconds"] == 0
+        unassigned = wrapper["data"]
+        assert len(unassigned) == 1
+        row = unassigned[0]
+        assert row["index"] == "logs_app_1_2024"
+        assert row["shard"] == 1
+        assert row["state"] == "UNASSIGNED"
+        assert row["reason"] == "NODE_LEFT"
+        assert row["at"] == "2026-08-01T10:00:00.000Z"
+        assert row["details"] == "node departed the cluster"
+    finally:
+        app.dependency_overrides.pop(get_es_client, None)
+
+
 # --- POST /es/refresh: triggers a real refresh, subsequent GET serves the fresh snapshot ---------
 
 
@@ -296,5 +359,5 @@ async def test_should_refresh_then_serve_fresh_snapshot(authed_client: AsyncClie
 
     # Refresh wrote every kind (single raw fetch fanned out).
     async with session_factory() as session:
-        for kind in ("health", "overview", "nodes", "indices", "shardmap", "pivot", "shards"):
+        for kind in ("health", "overview", "nodes", "indices", "shardmap", "pivot", "shards", "unassigned"):
             assert await snapshot_repo.get_latest(session, cluster_id, kind) is not None
