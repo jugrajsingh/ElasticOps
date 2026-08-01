@@ -371,6 +371,53 @@ export function useUpdateSettings(clusterId: number | null) {
   })
 }
 
+/** One unassigned shard row, mirroring `backend.services.snapshot_service.build_unassigned`. */
+export interface UnassignedShard {
+  index: string
+  shard: number
+  prirep: string
+  state: string
+  reason: string | null
+  at: string | null
+  for: string | null
+  details: string | null
+}
+
+export function useUnassigned(clusterId: number | null) {
+  const refetchInterval = useAutoRefetch()
+  return useQuery({
+    queryKey: ["es", "unassigned", clusterId],
+    queryFn: () => apiFetch<Cached<UnassignedShard[]>>(esPath(clusterId!, "/unassigned")),
+    enabled: clusterId !== null,
+    refetchInterval,
+    select: (r) => r.data,
+  })
+}
+
+/**
+ * Live allocation-explain call (never cached — the point is diagnosing the current decision).
+ * Read-only against ES, so it stays available even on a read-only cluster.
+ */
+export function useAllocationExplain(clusterId: number | null) {
+  return useMutation({
+    mutationFn: (body: { index?: string; shard?: number; primary?: boolean }) =>
+      apiFetch<Record<string, unknown>>(esPath(clusterId!, "/allocation/explain"), {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  })
+}
+
+/** Retry shards ES gave up allocating. A cluster write — blocked on read-only/inactive clusters. */
+export function useRetryFailedAllocations(clusterId: number | null) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<{ acknowledged?: boolean }>(esPath(clusterId!, "/reroute/retry-failed"), { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["es"] }),
+  })
+}
+
 export interface RebalanceSuggestion {
   index: string
   shard: number

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react"
+import { useNavigate } from "react-router-dom"
 import { useClusterContext } from "@/context/ClusterContext"
 import { useClusterHealth, useSnapshotMeta, useRefreshSnapshots, parseUtc } from "@/api/es"
 import { useAuth } from "@/context/AuthContext"
 import { useChangePassword } from "@/api/auth"
 import { formatNumber } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { UNASSIGNED_PANEL_ID } from "@/pages/Overview"
 
 const REFRESH_OPTIONS = [
   { label: "5s", value: 5000 },
@@ -105,6 +107,7 @@ export default function TopBar({ sidebarWidth }: TopBarProps) {
   const { activeCluster, refreshInterval, setRefreshInterval } = useClusterContext()
   const { data: health } = useClusterHealth(activeCluster?.id ?? null)
   const { isAuthenticated } = useAuth()
+  const navigate = useNavigate()
 
   const statusColor = health
     ? { green: "bg-eo-sage", yellow: "bg-eo-terracotta", red: "bg-eo-brick" }[health.status] ?? "bg-eo-muted"
@@ -133,7 +136,13 @@ export default function TopBar({ sidebarWidth }: TopBarProps) {
               <span className="text-eo-terracotta">{health.relocating_shards} relocating</span>
             )}
             {health.unassigned_shards > 0 && (
-              <span className="text-eo-brick">{health.unassigned_shards} unassigned</span>
+              <button
+                onClick={() => navigate(`/overview#${UNASSIGNED_PANEL_ID}`)}
+                title="Jump to the unassigned-shards triage panel on Overview"
+                className="text-eo-brick hover:underline underline-offset-2 cursor-pointer"
+              >
+                {health.unassigned_shards} unassigned
+              </button>
             )}
           </>
         ) : activeCluster ? (

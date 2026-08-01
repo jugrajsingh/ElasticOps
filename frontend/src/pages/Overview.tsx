@@ -1,9 +1,19 @@
+import { useEffect, useState } from "react"
+import { useLocation } from "react-router-dom"
 import { useClusterContext } from "@/context/ClusterContext"
-import { useOverview } from "@/api/es"
-import { getErrorMessage } from "@/api/client"
-import { formatBytes, formatNumber, diskColor, diskTextColor } from "@/lib/format"
+import {
+  useOverview,
+  useUnassigned,
+  useAllocationExplain,
+  useRetryFailedAllocations,
+  type UnassignedShard,
+} from "@/api/es"
+import { ApiError, getErrorMessage } from "@/api/client"
+import { formatBytes, formatNumber, formatSince, diskColor, diskTextColor } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import QueryError from "@/components/QueryError"
+
+export const UNASSIGNED_PANEL_ID = "unassigned-panel"
 
 const STORAGE_COLORS = [
   "bg-eo-amber",
@@ -36,6 +46,14 @@ const STORAGE_DOT_COLORS = [
 export default function Overview() {
   const { activeCluster } = useClusterContext()
   const { data, isError, error, refetch } = useOverview(activeCluster?.id ?? null)
+  const { data: unassigned } = useUnassigned(activeCluster?.id ?? null)
+  const location = useLocation()
+
+  // TopBar's unassigned badge links here with `#unassigned-panel`; scroll it into view on arrival.
+  useEffect(() => {
+    if (location.hash !== `#${UNASSIGNED_PANEL_ID}`) return
+    document.getElementById(UNASSIGNED_PANEL_ID)?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [location, unassigned])
 
   if (!activeCluster) {
     return (
@@ -97,6 +115,15 @@ export default function Overview() {
           accent={h.unassigned_shards > 0 ? "text-eo-brick" : "text-eo-sage"}
         />
       </div>
+
+      {/* Unassigned shards triage panel — only surfaces when the cluster actually has any. */}
+      {unassigned && unassigned.length > 0 && (
+        <UnassignedPanel
+          clusterId={activeCluster.id}
+          readOnly={!!activeCluster.read_only}
+          rows={unassigned}
+        />
+      )}
 
       {/* ROW 2: Node Disk Utilization */}
       <div className="flex-1 min-h-0 bg-eo-surface border border-eo-border rounded p-4 flex flex-col">
@@ -212,6 +239,218 @@ export default function Overview() {
             )}
           </tbody>
         </table>
+      </div>
+    </div>
+  )
+}
+
+function UnassignedPanel({
+  clusterId,
+  readOnly,
+  rows,
+}: {
+  clusterId: number
+  readOnly: boolean
+  rows: UnassignedShard[]
+}) {
+  const [explainRow, setExplainRow] = useState<UnassignedShard | null>(null)
+  const [confirmingRetry, setConfirmingRetry] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+  const [retrySuccess, setRetrySuccess] = useState(false)
+  const retry = useRetryFailedAllocations(clusterId)
+
+  const handleRetry = () => {
+    setRetryError(null)
+    setRetrySuccess(false)
+    retry.mutate(undefined, {
+      onSuccess: () => {
+        setConfirmingRetry(false)
+        setRetrySuccess(true)
+      },
+      onError: (err) => {
+        setConfirmingRetry(false)
+        setRetryError(err instanceof ApiError ? err.detail : "Retry failed")
+      },
+    })
+  }
+
+  return (
+    <div id={UNASSIGNED_PANEL_ID} className="shrink-0 bg-eo-surface border border-eo-brick/40 rounded p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-eo-brick">Unassigned Shards</h3>
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-eo-brick/20 text-eo-brick uppercase">
+            {rows.length}
+          </span>
+        </div>
+
+        {!readOnly && (
+          !confirmingRetry ? (
+            <button
+              onClick={() => {
+                setRetryError(null)
+                setRetrySuccess(false)
+                setConfirmingRetry(true)
+              }}
+              className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-cream hover:border-eo-amber hover:text-eo-amber transition-colors"
+            >
+              Retry Failed Allocations
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-eo-stone font-mono">Retry failed allocations now?</span>
+              <button
+                onClick={handleRetry}
+                disabled={retry.isPending}
+                className="px-3 py-1.5 text-xs font-mono rounded bg-eo-amber/20 border border-eo-amber text-eo-amber hover:bg-eo-amber/30 transition-colors disabled:opacity-50"
+              >
+                {retry.isPending ? "Retrying…" : "Confirm"}
+              </button>
+              <button
+                onClick={() => setConfirmingRetry(false)}
+                disabled={retry.isPending}
+                className="px-3 py-1.5 text-xs font-mono rounded border border-eo-border text-eo-stone hover:text-eo-cream transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          )
+        )}
+      </div>
+
+      {retrySuccess && <div className="mb-2 text-xs text-eo-sage font-mono">Retry submitted to the cluster.</div>}
+      {retryError && <div className="mb-2 text-xs text-eo-brick font-mono">{retryError}</div>}
+
+      <div className="max-h-64 overflow-y-auto custom-scrollbar">
+        <table className="w-full text-left font-mono text-[11px]">
+          <thead>
+            <tr className="text-eo-muted border-b border-eo-border sticky top-0 bg-eo-surface">
+              <th className="pb-2 font-normal">Index</th>
+              <th className="pb-2 font-normal">Shard</th>
+              <th className="pb-2 font-normal">P/R</th>
+              <th className="pb-2 font-normal">Reason</th>
+              <th className="pb-2 font-normal">Since</th>
+              <th className="pb-2 font-normal">Details</th>
+              <th className="pb-2 font-normal text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-eo-border/50">
+            {rows.map((row, i) => (
+              <tr key={`${row.index}-${row.shard}-${row.prirep}-${i}`}>
+                <td className="py-2 text-eo-cream">{row.index}</td>
+                <td className="py-2 text-eo-stone">[{row.shard}]</td>
+                <td className="py-2">
+                  <span
+                    className={cn(
+                      "px-1 rounded text-[10px]",
+                      row.prirep === "p" ? "bg-eo-amber/20 text-eo-amber" : "bg-eo-muted/20 text-eo-stone",
+                    )}
+                  >
+                    {row.prirep === "p" ? "P" : "R"}
+                  </span>
+                </td>
+                <td className="py-2 text-eo-terracotta">{row.reason ?? "-"}</td>
+                <td className="py-2 text-eo-stone">{formatSince(row.at)}</td>
+                <td className="py-2 text-eo-stone truncate max-w-[220px]" title={row.details ?? undefined}>
+                  {row.details ?? "-"}
+                </td>
+                <td className="py-2 text-right">
+                  <button
+                    onClick={() => setExplainRow(row)}
+                    className="px-2 py-1 text-[10px] font-mono rounded border border-eo-border text-eo-stone hover:border-eo-amber hover:text-eo-amber transition-colors"
+                  >
+                    Explain
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {explainRow && (
+        <ExplainDialog clusterId={clusterId} row={explainRow} onClose={() => setExplainRow(null)} />
+      )}
+    </div>
+  )
+}
+
+function ExplainDialog({
+  clusterId,
+  row,
+  onClose,
+}: {
+  clusterId: number
+  row: UnassignedShard
+  onClose: () => void
+}) {
+  const explain = useAllocationExplain(clusterId)
+  const [result, setResult] = useState<Record<string, unknown> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    explain.mutate(
+      { index: row.index, shard: row.shard, primary: row.prirep === "p" },
+      {
+        onSuccess: (data) => setResult(data),
+        onError: (err) => setError(err instanceof ApiError ? err.detail : "Explain failed"),
+      },
+    )
+    // Fire exactly once per opened row — `explain` (a fresh mutation object every render) is
+    // intentionally excluded from the dependency list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row])
+
+  const explanation = typeof result?.explanation === "string" ? result.explanation : undefined
+  const nodeDecisions = result?.node_allocation_decisions
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-eo-surface border border-eo-border rounded-lg w-full max-w-2xl max-h-[80vh] overflow-y-auto p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-eo-cream">
+            Allocation Explain &middot; {row.index}[{row.shard}]
+          </h2>
+          <button onClick={onClose} className="text-eo-muted hover:text-eo-cream">
+            <span className="material-symbols-outlined text-[20px]">close</span>
+          </button>
+        </div>
+
+        {explain.isPending && <div className="text-xs text-eo-muted font-mono">Explaining…</div>}
+        {error && <div className="text-xs text-eo-brick font-mono">{error}</div>}
+        {result && (
+          <div className="space-y-3">
+            {explanation && (
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-eo-muted font-mono mb-1">
+                  Explanation
+                </div>
+                <p className="text-xs text-eo-cream">{explanation}</p>
+              </div>
+            )}
+            {nodeDecisions !== undefined && (
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-eo-muted font-mono mb-1">
+                  Node Allocation Decisions
+                </div>
+                <pre className="text-[10px] text-eo-stone font-mono whitespace-pre-wrap bg-eo-bg rounded p-3 overflow-x-auto">
+                  {JSON.stringify(nodeDecisions, null, 2)}
+                </pre>
+              </div>
+            )}
+            <details>
+              <summary className="text-[10px] uppercase tracking-wider text-eo-muted font-mono cursor-pointer">
+                Full response
+              </summary>
+              <pre className="mt-2 text-[10px] text-eo-stone font-mono whitespace-pre-wrap bg-eo-bg rounded p-3 overflow-x-auto">
+                {JSON.stringify(result, null, 2)}
+              </pre>
+            </details>
+          </div>
+        )}
       </div>
     </div>
   )
